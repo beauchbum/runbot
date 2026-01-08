@@ -1,20 +1,15 @@
 services:
-  api:
-    build: 
+  console:
+    build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "${FASTAPI_PORT:-8000}:8000"
+    command: tail -f /dev/null
     volumes:
       - .:/usr/src/app
       - /usr/src/app/.venv
     env_file:
       - .env
-    # Enable hot reload
-    command: uv run uvicorn message_server:app --host 0.0.0.0 --port 8000
     restart: always
-    networks:
-      - backend
 
 networks:
   backend:

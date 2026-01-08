@@ -1,20 +1,18 @@
-# BeauchBot - AI Assistant with Twilio Integration
+# BeauchBot - AI Assistant for Event Management
 
-A Python FastAPI service that provides an AI assistant capable of responding to text messages via Twilio webhooks and performing scheduled tasks.
+An intelligent messaging assistant that automates event coordination and communication via SMS. BeauchBot manages contact lists, coordinates with event organizers, sends reminders to attendees, and integrates with calendar and event management systems.
 
 ## Features
 
-- **Secure Twilio Webhooks**: Validates incoming requests with signature verification
-- **AI Text Message Responses**: Automatically responds to SMS messages
-- **Google Docs Integration**: Read Google Docs for system prompts and data
-- **Contact Management**: Look up phone numbers from Google Docs
-- **Scheduled Tasks**: Cron job support with time simulation for testing
-- **Eastern Time**: Consistent EST/EDT timezone handling
-
-## API Endpoints
-
-- `GET /` - Redirects to API documentation
-- `POST /message` - Twilio webhook endpoint (secured with signature validation)
+- **Automated Event Messaging**: Send personalized reminders to event attendees with organizer contacts included
+- **Smart Deduplication**: Checks message history to avoid duplicate messages about the same event
+- **Calendar Integration**: Parses calendar documents to extract events, times, and organizer assignments
+- **Action Network Integration**: Links calendar events to Action Network for attendee lists and RSVPs
+- **Contact Management**: Validates organizers and attendees against contact directories
+- **Attendance Tracking**: Reads and writes attendance data to Google Sheets
+- **Phone Number Normalization**: Consistent E.164 format (+1XXXXXXXXXX) throughout the system
+- **Group Messaging**: Creates group conversations with event organizers and individual attendees
+- **Scheduled Execution**: Cron-friendly script with dry-run and time simulation for testing
 
 ## Setup
 
@@ -23,137 +21,170 @@ A Python FastAPI service that provides an AI assistant capable of responding to 
 Create a `.env` file with:
 
 ```bash
-# OpenAI
+# OpenAI (required)
 OPENAI_API_KEY=your_openai_api_key
 
-# Twilio
+# Twilio (required)
 TWILIO_ACCOUNT_SID=your_account_sid
 TWILIO_AUTH_TOKEN=your_auth_token
-TWILIO_PHONE_NUMBER=your_twilio_phone_number
-MY_PHONE_NUMBER=your_personal_phone_number
+TWILIO_PHONE_NUMBER=+15551234567
+MY_PHONE_NUMBER=+15559876543
 
-# Google (Base64 encoded service account JSON)
+# Google (required - Base64 encoded service account JSON)
 GOOGLE_SERVICE_ACCOUNT_B64=your_encoded_service_account
 
-# System prompt (Google Doc ID)
-SYSTEM_PROMPT_DOC_ID=your_system_prompt_document_id
+# Contact Directory (required - Google Doc ID)
+PHONE_DIRECTORY_DOC_ID=your_phone_directory_document_id
 
-# Attendance Sheets (for attendance tracking)
-ATTENDANCE_SHEET_ID=your_attendance_google_sheets_document_id
+# Attendance Tracking (optional - Google Sheets ID)
+ATTENDANCE_SHEET_ID=your_attendance_google_sheets_id
+
+# Action Network (optional - for event/attendee integration)
+ACTION_NETWORK_API_KEY=your_action_network_api_key
+
+# Organizer Filtering (optional - comma-separated list)
+ALLOWED_BLS=John Smith,Jane Doe
 ```
 
-### Using Docker (Recommended)
+**Note**: All phone numbers should be in E.164 format (+1XXXXXXXXXX), though the system will normalize various formats automatically.
+
+### Installation
+
+```shell
+# Using uv (recommended)
+uv sync --no-editable
+
+# Or with pip
+pip install -r requirements.txt
+```
+
+### Docker
 
 ```shell
 docker-compose up --build
 ```
 
-The API will be available at http://localhost:8000
+## Usage
 
-### Local Development
+### Scheduled Event Messaging
 
-```shell
-uv sync --no-editable
-uv run uvicorn message_server:app --reload
-```
-
-## Twilio Setup
-
-1. **Configure webhook URL** in [Twilio Console](https://console.twilio.com/):
-   - Phone Numbers → Active numbers → Select your number
-   - Messaging webhook: `https://your-domain.com/message` (POST)
-
-2. **Local development** with ngrok:
-   ```bash
-   ngrok http 8000
-   # Use: https://abc123.ngrok.io/message
-   ```
-
-3. **Security**: Webhook automatically validates Twilio signatures using your auth token.
-
-## Scheduled Tasks
-
-Run scheduled tasks using `scripts/ping_agent.py`:
+The main workflow automatically:
+1. Identifies upcoming events from calendar documents
+2. Extracts organizer assignments
+3. Matches events to Action Network for attendee lists
+4. Sends personalized group messages to attendees with organizers included
+5. Tracks message history to prevent duplicates
 
 ```bash
-# Normal execution (Eastern time)
+# Run the messaging workflow
 python scripts/ping_agent.py
 
-# Dry run (no text/SMS tools)
+# Dry run mode (no actual messages sent)
 python scripts/ping_agent.py --dry-run
 
-# Test with simulated time
+# Simulate a specific time for testing
 python scripts/ping_agent.py --simulate-time "2024-01-15,09:00"
+
+# Include attendance-based nudge suggestions
+python scripts/ping_agent.py --include-nudges
 ```
 
-Add to crontab for automated execution:
+### Automated Scheduling
+
+Add to crontab for hourly execution:
 ```bash
-# Run every hour
-0 * * * * cd /path/to/beauchbot && python scripts/ping_agent.py >> /var/log/beauchbot_cron.log 2>&1
+0 * * * * cd /path/to/beauchbot && python scripts/ping_agent.py >> /var/log/beauchbot.log 2>&1
 ```
 
-## Google Docs Configuration
+**Note**: The script only runs during operating hours (8 AM - 8 PM) and processes events within a configurable time window.
 
-### System Prompt Document
+## Configuration
 
-Create a Google Document with the agent's instructions and behavior:
+### Google Service Account
 
-1. Create a Google Doc with your system prompt
-2. Share with your service account email (viewer access)
-3. Get document ID from URL: `docs.google.com/document/d/DOCUMENT_ID/edit`
-4. Set `SYSTEM_PROMPT_DOC_ID` environment variable
+1. Create a service account in [Google Cloud Console](https://console.cloud.google.com/)
+2. Enable Google Docs API and Google Sheets API
+3. Create and download service account JSON key
+4. Base64 encode the JSON and set as `GOOGLE_SERVICE_ACCOUNT_B64`
 
-### Contact Management
+```bash
+base64 -i service-account.json | tr -d '\n'
+```
 
-BeauchBot can look up phone numbers from a Google Doc. Create a document with:
+### Contact Directory
+
+Create a Google Doc with contacts in the format:
 ```
 Name: Phone Number
-John: +15551234567
-Jane: +15559876543
+John Smith: +15551234567
+Jane Doe: (555) 987-6543
+Bob Wilson: 555-111-2222
 ```
 
-## Available Tools
+Share the document with your service account email (viewer access) and set the document ID in `PHONE_DIRECTORY_DOC_ID`.
 
-- **list_google_documents** - List accessible Google Docs
-- **read_google_document** - Read specific Google Documents  
-- **get_conversation_history** - Get SMS conversation history
-- **text_me** - Send SMS to your personal number (MY_PHONE_NUMBER)
-- **get_phone_numbers** - Look up contacts from Google Doc
-- **get_current_time** - Get current Eastern time
+**Note**: Phone numbers can be in any common format - they will be normalized automatically.
 
-## Example Usage
+### Calendar Documents
 
-```
-You: "Text me a reminder about the meeting"
-BeauchBot: [sends SMS to your personal phone]
+Calendar documents should contain event information including:
+- Event names and times
+- Organizer assignments (e.g., "BL: (H) John (T) Jane")
+- Date and location details
 
-You: "What time is it?"
-BeauchBot: "The current time is 2:30 PM EST."
+The LLM will intelligently parse the calendar structure to extract events and assignments.
 
-You: "List my Google documents"
-BeauchBot: "I found 5 documents: Meeting Notes, Project Plan, Budget..."
+### Attendance Tracking (Optional)
 
-You: "Read the Meeting Notes document"
-BeauchBot: "Here's the content from Meeting Notes: [document content]"
-```
+Set `ATTENDANCE_SHEET_ID` to enable writing attendance data to Google Sheets. The sheet will be automatically populated with:
+- Event dates
+- Event names
+- Attendee lists
 
-## Deployment
+## Architecture
 
-Configured for deployment on Render via `render.yaml`. Add environment variables to your Render dashboard and deploy.
+**Core Components**:
+- `scripts/ping_agent.py` - Main workflow orchestrator
+- `utils/phone_utils.py` - Phone number normalization and validation
+- `utils/action_network_utils.py` - Event and attendee integration
+- `utils/attendance_utils.py` - Attendance analysis and nudge suggestions
+- `tools/twilio.py` - SMS messaging with group conversation support
+- `tools/google_docs.py` - Document reading and sheet writing
+
+**Key Features**:
+- LLM-powered calendar parsing and name matching
+- On-demand message history fetching for efficiency
+- Smart deduplication across multiple conversations
+- Group MMS support with automatic conversation reuse
 
 ## Development
 
-```shell
-# Add dependencies
+### Testing
+
+```bash
+# Test phone number normalization
+python scripts/test_phone_normalization.py
+
+# Test message history fetching
+python scripts/test_message_history.py +15551234567
+
+# Test Action Network integration
+python scripts/test_action_network.py
+```
+
+### Dependencies
+
+```bash
+# Add new package
 uv add package-name
 
-# Update dependencies  
+# Update all dependencies
 uv sync --upgrade --no-editable
 
-# Activate virtual environment
-source .venv/bin/activate  # Unix/Mac
-.venv\Scripts\activate     # Windows
-
-# Or run commands directly with uv
-uv run python script.py
+# Run scripts
+uv run python scripts/ping_agent.py
 ```
+
+## License
+
+MIT

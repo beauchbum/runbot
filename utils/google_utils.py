@@ -177,8 +177,6 @@ def extract_text_from_document(doc_content: Dict[str, Any]) -> str:
     
     return full_text.strip()
 
-
-def get_system_prompt_from_google_doc() -> str:
     """
     Fetch the system prompt from a Google Doc.
     
