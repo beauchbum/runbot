@@ -5,6 +5,8 @@ Provides functionality to:
 - Send individual SMS and Group MMS messages
 - Get conversation history for individuals and groups
 - Get contact phone numbers
+
+All phone numbers are normalized to E.164 format (+1XXXXXXXXXX) for consistency.
 """
 
 import os
@@ -19,9 +21,13 @@ from agents import function_tool
 from twilio.rest import Client
 
 # Import shared phone utilities
-from utils.phone_utils import validate_phone_numbers_against_contacts, format_contact_list_for_error
+from utils.phone_utils import validate_phone_numbers_against_contacts, format_contact_list_for_error, normalize_phone_number
 
 logger = logging.getLogger(__name__)
+
+# Reduce Twilio logging verbosity
+logging.getLogger('twilio').setLevel(logging.WARNING)
+logging.getLogger('twilio.http_client').setLevel(logging.WARNING)
 
 
 def get_twilio_client():
@@ -38,26 +44,47 @@ def get_twilio_client():
 
 
 def get_twilio_phone_number() -> str:
-    """Get the Twilio phone number from environment variables."""
+    """
+    Get the Twilio phone number from environment variables.
+
+    Returns:
+        Normalized phone number in E.164 format (+1XXXXXXXXXX)
+
+    Raises:
+        ValueError: If environment variable is not set or phone number is invalid
+    """
     twilio_number = os.getenv('TWILIO_PHONE_NUMBER')
-    
+
     if not twilio_number:
         raise ValueError("TWILIO_PHONE_NUMBER environment variable is required")
-    
-    return twilio_number
+
+    try:
+        return normalize_phone_number(twilio_number)
+    except ValueError as e:
+        raise ValueError(f"Invalid TWILIO_PHONE_NUMBER: {e}")
 
 
 def get_my_phone_number() -> str:
-    """Get my personal phone number from environment variables."""
+    """
+    Get my personal phone number from environment variables.
+
+    Returns:
+        Normalized phone number in E.164 format (+1XXXXXXXXXX)
+
+    Raises:
+        ValueError: If environment variable is not set or phone number is invalid
+    """
     my_number = os.getenv('MY_PHONE_NUMBER')
-    
+
     if not my_number:
         raise ValueError("MY_PHONE_NUMBER environment variable is required")
-    
-    return my_number
+
+    try:
+        return normalize_phone_number(my_number)
+    except ValueError as e:
+        raise ValueError(f"Invalid MY_PHONE_NUMBER: {e}")
 
 
-@function_tool
 def send_text(to_numbers: List[str], message: str) -> Dict[str, Any]:
     """Send a text message to an individual or group via Twilio.
 
@@ -65,47 +92,37 @@ def send_text(to_numbers: List[str], message: str) -> Dict[str, Any]:
     For group messaging (2+ numbers): Creates Group MMS where all participants see each other's messages
     Group MMS requires US/Canada (+1) numbers and creates true group conversations.
     Automatically reuses existing conversations with the same participants to avoid conflicts.
-    
+
     Args:
-        to_numbers: List of phone numbers to send to in E.164 format (e.g., ['+12345678901'] for individual or ['+12345678901', '+19876543210'] for group)
+        to_numbers: List of phone numbers in any format (will be normalized to E.164: +1XXXXXXXXXX)
         message: The message content to send
-    
+
     Returns:
         Message status information or group conversation details including 'reused_existing' flag
     """
     try:
         if not to_numbers or len(to_numbers) == 0:
             return {"error": "At least one phone number is required"}
-        
-        # Validate phone numbers against allowed contacts
-        valid_numbers, invalid_numbers, matching_contacts = validate_phone_numbers_against_contacts(to_numbers)
-        
-        if invalid_numbers:
-            # Get full contact list for error message
-            from utils.phone_utils import get_allowed_contacts
-            all_contacts = get_allowed_contacts()
-            contact_list = format_contact_list_for_error(all_contacts)
-            
-            error_msg = f"Cannot send messages to unauthorized phone numbers: {', '.join(invalid_numbers)}\n\n{contact_list}"
-            return {"error": error_msg}
-        
-        if not valid_numbers:
-            return {"error": "No valid phone numbers provided"}
-        
+
+        # Normalize all phone numbers to E.164 format
+        normalized_numbers = []
+        for phone in to_numbers:
+            try:
+                normalized = normalize_phone_number(phone)
+                normalized_numbers.append(normalized)
+            except ValueError as e:
+                return {"error": f"Invalid phone number '{phone}': {e}"}
+
         client = get_twilio_client()
         from_number = get_twilio_phone_number()
         
-        # Log the validated contacts
-        contact_names = [contact['name'] for contact in matching_contacts]
-        logger.info(f"Sending message to validated contacts: {', '.join(contact_names)}")
-        
         # Determine if this is individual or group messaging based on recipient count
-        if len(valid_numbers) == 1:
+        if len(normalized_numbers) == 1:
             # Individual messaging using standard SMS
-            return _send_individual_text(client, from_number, valid_numbers[0], message)
+            return _send_individual_text(client, from_number, normalized_numbers[0], message)
         else:
             # Group messaging using Group MMS
-            return _send_group_text(client, from_number, valid_numbers, message)
+            return _send_group_text(client, from_number, normalized_numbers, message)
             
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
@@ -114,104 +131,6 @@ def send_text(to_numbers: List[str], message: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error sending text: {e}")
         return {"error": f"Failed to send text: {str(e)}"}
-    
-@function_tool
-def send_text_dry(to_numbers: List[str], message: str) -> Dict[str, Any]:
-    """Send a text message to a group via Twilio. This is a dry run tool that will not send a message to the group.
-    Use this message when you would have used the send_text tool, but you want to see what the message would look like before sending it.
-
-    Args:
-        to_numbers: List of phone numbers to send to in E.164 format (e.g., ['+12345678901'] for individual or ['+12345678901', '+19876543210'] for group)
-        message: The message content to send
-
-    Returns:
-        A dictionary with the message content and status
-    """
-    return {"debug": "This is a dry run tool that will not send a message to the group.", "to_numbers": to_numbers, "message": message, "status": "dry_run"}
-
-@function_tool
-def get_conversation_history(identifier: str, limit: int = 20) -> List[Dict[str, Any]]:
-    """Get conversation history for either an individual phone number or a group conversation.
-    
-    Use the get_phone_numbers tool to get a list of contacts with their names and phone numbers for Twilio interactions.
-    For individual chats: Provide a phone number in E.164 format (e.g., "+1234567890")
-    For group chats: Provide a conversation SID starting with 'CH' (e.g., "CHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-    
-    Args:
-        identifier: Phone number in E.164 format (e.g., '+1234567890') for individual chat, or conversation SID (CHxxx) for group chat
-        limit: Maximum number of messages to return (default: 20)
-    
-    Returns:
-        List of messages in the conversation, sorted by date (most recent first)
-    """
-    try:
-        if not identifier.strip():
-            return [{"error": "Phone number or conversation SID is required"}]
-        
-        client = get_twilio_client()
-        
-        # Determine if this is a conversation SID or phone number
-        if identifier.startswith('CH') and len(identifier) == 34:
-            # This is a conversation SID - get group conversation history
-            return _get_group_conversation_history(client, identifier, limit)
-        else:
-            # This is a phone number - get individual conversation history
-            return _get_individual_conversation_history(client, identifier, limit)
-            
-    except Exception as e:
-        logger.error(f"Error getting conversation history: {e}")
-        return [{"error": f"Failed to get conversation history: {str(e)}"}]
-
-
-@function_tool
-def text_me(message: str) -> Dict[str, Any]:
-    """Send a text message to my personal phone number via Twilio.
-    
-    This tool uses the TWILIO_PHONE_NUMBER environment variable as the sender 
-    and MY_PHONE_NUMBER environment variable as the recipient.
-    
-    Args:
-        message: The message content to send to my phone
-    
-    Returns:
-        Message status information
-    """
-    try:
-        if not message.strip():
-            return {"error": "Message content is required"}
-        
-        client = get_twilio_client()
-        from_number = get_twilio_phone_number()
-        to_number = get_my_phone_number()
-        
-        # Send SMS using standard Twilio messaging
-        message_result = client.messages.create(
-            body=message,
-            from_=from_number,
-            to=to_number
-        )
-        
-        response = {
-            "type": "text_me",
-            "message_sid": message_result.sid,
-            "to": to_number,
-            "from": from_number,
-            "body": message,
-            "status": message_result.status,
-            "date_created": message_result.date_created.isoformat() if message_result.date_created else None
-        }
-        
-        logger.info(f"Text message sent to personal number, Message: {message_result.sid}")
-        return response
-            
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        return {"error": str(e)}
-    
-    except Exception as e:
-        logger.error(f"Error sending text message: {e}")
-        return {"error": f"Failed to send text message: {str(e)}"}
-
 
 # ============================================================================
 # HELPER FUNCTIONS (Internal)
@@ -427,80 +346,89 @@ def _send_group_text(client, from_number: str, to_numbers: List[str], message: s
         return {"error": f"Failed to send group text: {str(e)}"}
 
 
-def _get_individual_conversation_history(client, phone_number: str, limit: int) -> List[Dict[str, Any]]:
-    """Get conversation history for individual SMS messages."""
+def get_all_messages_to_phone_number(phone_number: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """
+    Get all messages sent from our Twilio number to a specific phone number.
+
+    This searches across all conversations (individual and group) to find any messages
+    we've sent to this person, regardless of which conversation they were in.
+
+    Args:
+        phone_number: Phone number in any format (will be normalized to E.164: +1XXXXXXXXXX)
+        limit: Maximum number of messages to retrieve (default: 20)
+
+    Returns:
+        List of message dictionaries with body, date_created, and conversation info
+    """
     try:
-        from_number = get_twilio_phone_number()
-        
-        # Get messages between our Twilio number and the target number
-        messages = client.messages.list(
-            limit=limit,
-            from_=phone_number,
-            to=from_number
-        )
-        
-        # Get messages we sent to them
-        sent_messages = client.messages.list(
-            limit=limit,
-            from_=from_number,
-            to=phone_number
-        )
-        
-        # Combine and sort by date
-        all_messages = list(messages) + list(sent_messages)
-        all_messages.sort(key=lambda x: x.date_created, reverse=True)
-        
-        # Limit to the requested number
+        # Normalize the phone number
+        try:
+            phone_number = normalize_phone_number(phone_number)
+        except ValueError as e:
+            logger.error(f"Invalid phone number '{phone_number}': {e}")
+            return []
+
+        client = get_twilio_client()
+        twilio_number = get_twilio_phone_number()
+
+        all_messages = []
+
+        # Search through recent conversations to find ones that include this phone number
+        conversations = client.conversations.v1.conversations.list(limit=100)
+
+        for conversation in conversations:
+            try:
+                if conversation.state != 'active':
+                    continue
+
+                # Get participants for this conversation
+                participants = client.conversations.v1.conversations(conversation.sid).participants.list()
+
+                # Check if the target phone number is a participant
+                participant_found = False
+                for participant in participants:
+                    if participant.messaging_binding:
+                        participant_address = None
+                        if hasattr(participant.messaging_binding, 'address') and participant.messaging_binding.address:
+                            participant_address = participant.messaging_binding.address
+                        elif isinstance(participant.messaging_binding, dict) and participant.messaging_binding.get('address'):
+                            participant_address = participant.messaging_binding['address']
+
+                        if participant_address == phone_number:
+                            participant_found = True
+                            break
+
+                # If this conversation includes the target phone number, get messages
+                if participant_found:
+                    # Get messages from this conversation sent by beauchbot_assistant
+                    messages = client.conversations.v1.conversations(conversation.sid).messages.list(
+                        limit=limit,
+                        order='desc'
+                    )
+
+                    for msg in messages:
+                        # Only include messages sent by us (beauchbot_assistant)
+                        if msg.author == "beauchbot_assistant":
+                            all_messages.append({
+                                "conversation_sid": conversation.sid,
+                                "body": msg.body,
+                                "date_created": msg.date_created.isoformat() if msg.date_created else None,
+                                "message_sid": msg.sid
+                            })
+
+            except Exception as e:
+                logger.warning(f"Error checking conversation {conversation.sid}: {e}")
+                continue
+
+        # Sort by date (most recent first)
+        all_messages.sort(key=lambda x: x.get('date_created', ''), reverse=True)
+
+        # Limit to requested number
         all_messages = all_messages[:limit]
-        
-        # Format the messages
-        formatted_messages = []
-        for msg in all_messages:
-            formatted_messages.append({
-                "message_sid": msg.sid,
-                "from": msg.from_,
-                "to": msg.to,
-                "body": msg.body,
-                "direction": "outbound" if msg.from_ == from_number else "inbound",
-                "status": msg.status,
-                "date_created": msg.date_created.isoformat() if msg.date_created else None,
-                "date_sent": msg.date_sent.isoformat() if msg.date_sent else None,
-                "type": "individual"
-            })
-        
-        logger.info(f"Retrieved {len(formatted_messages)} individual messages for {phone_number}")
-        return formatted_messages
-        
-    except Exception as e:
-        logger.error(f"Error getting individual conversation history: {e}")
-        return [{"error": f"Failed to get individual conversation history: {str(e)}"}]
 
+        logger.debug(f"Found {len(all_messages)} messages sent to {phone_number} across all conversations")
+        return all_messages
 
-def _get_group_conversation_history(client, conversation_sid: str, limit: int) -> List[Dict[str, Any]]:
-    """Get conversation history for group conversations."""
-    try:
-        # Get messages from the conversation
-        messages = client.conversations.v1.conversations(conversation_sid).messages.list(
-            limit=limit,
-            order='desc'
-        )
-        
-        # Format the messages
-        formatted_messages = []
-        for msg in messages:
-            formatted_messages.append({
-                "message_sid": msg.sid,
-                "conversation_sid": conversation_sid,
-                "author": msg.author,
-                "body": msg.body,
-                "participant_sid": msg.participant_sid,
-                "date_created": msg.date_created.isoformat() if msg.date_created else None,
-                "type": "group"
-            })
-        
-        logger.info(f"Retrieved {len(formatted_messages)} group messages for conversation {conversation_sid}")
-        return formatted_messages
-        
     except Exception as e:
-        logger.error(f"Error getting group conversation history: {e}")
-        return [{"error": f"Failed to get group conversation history: {str(e)}"}]
+        logger.error(f"Error fetching all messages to {phone_number}: {e}")
+        return []

@@ -24,6 +24,3 @@ RUN uv sync --locked --no-install-project
 # Activate venv by default in shell (optional but nice)
 ENV VIRTUAL_ENV=$PYSETUP_PATH/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-
-# Expose port
-EXPOSE 8000

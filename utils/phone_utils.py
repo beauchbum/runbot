@@ -5,6 +5,9 @@ Provides shared functionality for:
 - Phone number parsing and validation
 - Contact management
 - Phone number normalization
+
+All phone numbers in this project are normalized to E.164 format: +1XXXXXXXXXX
+where +1 is the US country code and X represents 10 digits.
 """
 
 import os
@@ -13,6 +16,75 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_phone_number(phone: str) -> str:
+    """
+    Normalize a phone number to E.164 format (+1XXXXXXXXXX).
+
+    This is the canonical phone number format used throughout the BeauchBot project.
+    All phone numbers are assumed to be US numbers (country code +1).
+
+    Handles various input formats:
+    - With/without country code: "5551234567", "15551234567", "+15551234567"
+    - With separators: "(555) 123-4567", "555.123.4567", "555-123-4567"
+    - With spaces: "555 123 4567", "+1 555 123 4567"
+
+    Args:
+        phone: Phone number in any format
+
+    Returns:
+        Phone number in E.164 format (+1XXXXXXXXXX)
+
+    Raises:
+        ValueError: If phone number cannot be normalized to valid US format
+    """
+    if not phone:
+        raise ValueError("Phone number cannot be empty")
+
+    # Remove all non-digit characters except leading +
+    cleaned = re.sub(r'[^\d+]', '', phone)
+
+    # Remove + sign temporarily to work with just digits
+    if cleaned.startswith('+'):
+        cleaned = cleaned[1:]
+
+    # Remove any remaining + signs that aren't at the start
+    cleaned = cleaned.replace('+', '')
+
+    # Ensure we have only digits
+    if not cleaned.isdigit():
+        raise ValueError(f"Phone number contains invalid characters: {phone}")
+
+    # Handle different digit counts
+    if len(cleaned) == 10:
+        # 10 digits - assume US number, add +1
+        return f"+1{cleaned}"
+    elif len(cleaned) == 11 and cleaned.startswith('1'):
+        # 11 digits starting with 1 - US number with country code
+        return f"+{cleaned}"
+    elif len(cleaned) == 11 and not cleaned.startswith('1'):
+        raise ValueError(f"11-digit number must start with 1 (country code): {phone}")
+    else:
+        raise ValueError(f"Invalid phone number length ({len(cleaned)} digits): {phone}. Expected 10 or 11 digits.")
+
+
+def validate_phone_number(phone: str) -> bool:
+    """
+    Validate if a phone number is in the correct E.164 format (+1XXXXXXXXXX).
+
+    Args:
+        phone: Phone number to validate
+
+    Returns:
+        True if phone number is in valid E.164 format, False otherwise
+    """
+    try:
+        normalized = normalize_phone_number(phone)
+        # Check if it matches the expected pattern
+        return bool(re.match(r'^\+1\d{10}$', normalized))
+    except (ValueError, TypeError):
+        return False
 
 
 def parse_phone_numbers_from_text(text_content: str) -> List[Dict[str, str]]:
@@ -65,21 +137,12 @@ def parse_phone_numbers_from_text(text_content: str) -> List[Dict[str, str]]:
             if not re.search(r'\d', phone_part):
                 continue
                 
-            # Clean up the phone number - remove common formatting but preserve the content
-            # This handles formats like: (555) 123-4567, +1-555-123-4567, 555.123.4567, etc.
-            cleaned_phone = re.sub(r'[^\d+]', '', phone_part)
-            
-            # If phone starts with 1 and has 11 digits, format as +1XXXXXXXXXX
-            if cleaned_phone.startswith('1') and len(cleaned_phone) == 11:
-                formatted_phone = f"+{cleaned_phone}"
-            # If phone has 10 digits, assume US number and add +1
-            elif len(cleaned_phone) == 10 and cleaned_phone.isdigit():
-                formatted_phone = f"+1{cleaned_phone}"
-            # If phone already has + or is international format, keep as is
-            elif cleaned_phone.startswith('+'):
-                formatted_phone = cleaned_phone
-            else:
-                # Keep original phone format if we can't determine the proper format
+            # Normalize phone number to E.164 format (+1XXXXXXXXXX)
+            try:
+                formatted_phone = normalize_phone_number(phone_part)
+            except ValueError as e:
+                # Log warning but keep the contact with original phone format for debugging
+                logger.warning(f"Could not normalize phone number '{phone_part}' for '{name_part}': {e}")
                 formatted_phone = phone_part
             
             contacts.append({
