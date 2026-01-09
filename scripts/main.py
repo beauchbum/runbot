@@ -13,7 +13,9 @@ It performs the following workflow for upcoming runs:
 7. Send group messages to attendees (with BLs included)
 
 Environment Variables Required:
-- OPENAI_API_KEY: OpenAI API key for the LLM
+- LLM_SERVER_URL: URL of the local LLM server (e.g., http://llm-server:8000)
+- LLM_USERNAME: Username for local LLM server authentication
+- LLM_PASSWORD: Password for local LLM server authentication
 - GOOGLE_SERVICE_ACCOUNT_B64: Base64 encoded Google service account JSON
 - PHONE_DIRECTORY_DOC_ID: Google Doc ID containing contact information
 - ACTION_NETWORK_API_KEY: Action Network API key for event linking
@@ -44,11 +46,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from openai import OpenAI
-
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from utils.llm_client import LocalLLMClient
 from utils.twilio import get_all_messages_to_phone_number, send_text
 from utils.action_network_utils import (
     fetch_all_action_network_events,
@@ -83,7 +84,7 @@ def parse_simulated_time(simulated_time: str) -> datetime:
     return naive_time.replace(tzinfo=ZoneInfo("America/New_York"))
 
 
-def identify_calendar_doc(client: OpenAI, available_docs: List[Dict[str, Any]], current_time: datetime) -> Optional[str]:
+def identify_calendar_doc(client: LocalLLMClient, available_docs: List[Dict[str, Any]], current_time: datetime) -> Optional[str]:
     """Use LLM to identify which document is the calendar for the current month."""
     doc_list = "\n".join([
         f"- ID: {doc['id']}, Name: {doc['name']}, Modified: {doc.get('modified_time', 'Unknown')}"
@@ -113,7 +114,7 @@ Otherwise, respond with ONLY the document ID, nothing else."""
             {"role": "system", "content": "You are a helpful assistant that identifies documents."},
             {"role": "user", "content": prompt}
         ],
-        temperature=0
+        temperature=0.1
     )
 
     doc_id = response.choices[0].message.content.strip()
@@ -126,7 +127,7 @@ Otherwise, respond with ONLY the document ID, nothing else."""
     return doc_id
 
 
-def parse_runs_from_calendar(client: OpenAI, calendar_text: str, current_time: datetime) -> List[Dict[str, Any]]:
+def parse_runs_from_calendar(client: LocalLLMClient, calendar_text: str, current_time: datetime) -> List[Dict[str, Any]]:
     """Use LLM to parse all runs from calendar document, including BL assignments."""
     current_month = current_time.strftime('%B')
     current_year = current_time.year
@@ -249,7 +250,7 @@ def get_allowed_bls() -> Optional[List[str]]:
     return allowed_bls
 
 
-def validate_bls_against_contacts(client: OpenAI, bl_names: List[str], contacts: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def validate_bls_against_contacts(client: LocalLLMClient, bl_names: List[str], contacts: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Validate BL names against the contact list using LLM for intelligent matching."""
     if not bl_names:
         return []
@@ -391,7 +392,7 @@ def format_attendee_message(attendee_name: str, bl_names: List[str], run_name: s
 
 
 def check_if_already_messaged_about_run(
-    client: OpenAI,
+    client: LocalLLMClient,
     all_messages: List[Dict[str, Any]],
     run_name: str,
     run_datetime: datetime
@@ -469,7 +470,7 @@ def fetch_attendee_message_history(attendee_phone: str, attendee_name: str) -> L
         return []
 
 
-def check_bl_message_history(client: OpenAI, valid_bl_contacts: List[Dict[str, str]], run_name: str, run_time: datetime) -> bool:
+def check_bl_message_history(client: LocalLLMClient, valid_bl_contacts: List[Dict[str, str]], run_name: str, run_time: datetime) -> bool:
     """Check if we've already messaged BLs about this run. Returns True if already messaged."""
     for bl_contact in valid_bl_contacts:
         bl_name = bl_contact['name']
@@ -547,7 +548,7 @@ def send_nudge_message_to_bls(
 
 
 def send_messages_to_attendees(
-    client: OpenAI,
+    client: LocalLLMClient,
     attendees: List[Dict[str, Any]],
     valid_bl_contacts: List[Dict[str, str]],
     bl_names: List[str],
@@ -636,7 +637,7 @@ def send_messages_to_attendees(
 
 def process_run(
     run: Dict[str, Any],
-    client: OpenAI,
+    client: LocalLLMClient,
     contacts: List[Dict[str, str]],
     action_network_events: List[Dict[str, Any]],
     attendance_data: List[Dict[str, Any]],
@@ -743,7 +744,7 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
     logger.info(f"Starting BeauchBot cron execution at {start_time}")
 
     try:
-        required_vars = ["OPENAI_API_KEY", "GOOGLE_SERVICE_ACCOUNT_B64", "PHONE_DIRECTORY_DOC_ID"]
+        required_vars = ["LLM_SERVER_URL", "LLM_USERNAME", "LLM_PASSWORD", "GOOGLE_SERVICE_ACCOUNT_B64", "PHONE_DIRECTORY_DOC_ID"]
         missing_vars = [var for var in required_vars if not os.getenv(var)]
         if missing_vars:
             logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
@@ -762,7 +763,13 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
             current_time = datetime.now(eastern_tz)
             logger.info(f"Current time: {current_time.strftime('%Y-%m-%d %I:%M %p %Z')}")
 
-        client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        client = LocalLLMClient()
+
+        # Check if LLM server is healthy
+        if not client.health_check():
+            logger.error("Local LLM server is not healthy")
+            return 1
+        logger.info("Local LLM server is healthy")
 
         drive_service = get_google_drive_service()
         results = drive_service.files().list(
