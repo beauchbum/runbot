@@ -14,6 +14,57 @@ RunBot automates the workflow of coordinating events by:
 
 The system runs on a schedule (typically hourly) and intelligently determines which events need reminders based on timing windows and previous message history.
 
+## Security Considerations
+
+### Architecture Safeguards
+
+**No External Entry Points**:
+- RunBot operates as a scheduled cron job with no web server or API endpoints
+- Cannot be triggered or manipulated by external requests
+- All execution is initiated locally on a trusted system
+
+**Deterministic Messaging**:
+- Message content and recipients are determined by structured data sources (Google Docs, Action Network)
+- Twilio SMS sending follows a predictable workflow with validated phone numbers
+- No user input is accepted that could inject arbitrary content or recipients
+
+**Access Control**:
+- Service account credentials required for Google Docs/Sheets access
+- Twilio API credentials required for SMS operations
+- Action Network API key required for attendee data
+- All credentials stored in environment variables, not in code
+
+### Privacy & Data Handling Risks
+
+**LLM Processing of Sensitive Data**:
+- OpenAI API receives potentially sensitive information including:
+  - Event names, times, and locations
+  - Organizer and attendee names
+  - Phone numbers (in normalized format)
+  - Message history content for deduplication analysis
+- Data is sent to OpenAI's servers for processing (subject to their data handling policies)
+- Consider this risk when working with highly confidential events or personal information
+
+**Third-Party Service Dependencies**:
+- Google Docs/Sheets: Contains contact directory and attendance records
+- Twilio: Processes and delivers all SMS messages
+- Action Network: Provides attendee lists and RSVP data
+- Each service has access to subsets of personal information required for their function
+
+**Mitigation Strategies**:
+- Phone numbers are normalized but not encrypted in transit to LLM
+- Message history queries are scoped to specific attendees (not bulk fetching)
+- Dry-run mode available for testing without sending actual messages
+- Logging can be reviewed to audit what data is processed
+
+### Recommendations
+
+- Run RunBot on a secure, trusted system with appropriate access controls
+- Regularly rotate API keys and service account credentials
+- Review OpenAI's data usage policies and consider enterprise agreements if handling sensitive data
+- Monitor logs for unexpected behavior or data exposure
+- Consider data retention policies for message history and attendance records
+
 ## Workflow Diagram
 
 ```mermaid
