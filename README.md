@@ -8,8 +8,9 @@ RunBot automates the workflow of coordinating events by:
 1. Reading calendar documents to identify upcoming events
 2. Extracting organizer assignments from calendar entries
 3. Matching events to Action Network to retrieve attendee lists
-4. Sending personalized group SMS messages to attendees with their assigned organizers
-5. Tracking message history to prevent duplicate notifications
+4. Optionally identifying nudge candidates based on attendance history
+5. Sending personalized group SMS messages to attendees with their assigned organizers
+6. Tracking message history to prevent duplicate notifications
 
 The system runs on a schedule (typically hourly) and intelligently determines which events need reminders based on timing windows and previous message history.
 
@@ -29,7 +30,13 @@ flowchart TD
 
     MatchAction --> GetAttendees[Retrieve Attendee Lists<br/>with Phone Numbers]
 
-    GetAttendees --> ValidateContacts[Validate Contacts<br/>against Phone Directory]
+    GetAttendees --> CheckNudges{Include nudges<br/>flag enabled?}
+    CheckNudges -->|Yes| LoadAttendance[Load Attendance Data<br/>from Google Sheets]
+    CheckNudges -->|No| ValidateContacts
+
+    LoadAttendance --> AnalyzeNudges[Analyze Attendance History<br/>Identify Nudge Candidates]
+
+    AnalyzeNudges --> ValidateContacts[Validate Contacts<br/>against Phone Directory]
 
     ValidateContacts --> LoopEvents{For each event}
 
@@ -39,17 +46,15 @@ flowchart TD
 
     FetchHistory --> CheckDupe{LLM: Already<br/>messaged about<br/>this event?}
 
-    CheckDupe -->|Yes| LoopAttendees
+    CheckDupe -->|Yes| NextAttendee[Skip to next attendee]
     CheckDupe -->|No| GetOrganizers[Get Assigned Organizers<br/>for this Event]
 
     GetOrganizers --> CreateGroup[Create/Find Group<br/>Conversation]
 
-    CreateGroup --> SendMessage[Send Group SMS<br/>Attendee + Organizers]
+    CreateGroup --> SendMessage[Send Group SMS<br/>Attendee + Organizers<br/>+ Nudge Info if applicable]
 
-    SendMessage --> UpdateAttendance{Attendance<br/>tracking enabled?}
-    UpdateAttendance -->|Yes| WriteSheet[Write Attendance Data<br/>to Google Sheets]
-    UpdateAttendance -->|No| LoopAttendees
-    WriteSheet --> LoopAttendees
+    SendMessage --> NextAttendee
+    NextAttendee --> LoopAttendees
 
     LoopAttendees -->|More attendees| LoopAttendees
     LoopAttendees -->|Done| LoopEvents
@@ -62,6 +67,7 @@ flowchart TD
     style SendMessage fill:#e1e5ff
     style CheckDupe fill:#fff9e1
     style ParseEvents fill:#f0e1ff
+    style AnalyzeNudges fill:#ffe1f5
 ```
 
 ## How It Works
@@ -109,15 +115,15 @@ The LLM-powered parsing allows for flexible calendar formats rather than requiri
 - Can simulate different times for testing purposes (`--simulate-time`)
 - Supports dry-run mode for testing without sending actual messages (`--dry-run`)
 
-### Attendance Tracking
+### Nudge Candidates
 
-**Google Sheets Integration** (`utils/attendance_utils.py`):
-- Reads attendance data from Google Sheets to track who attended past events
-- Writes new attendance records automatically after events
-- Provides optional attendance-based nudge suggestions (`--include-nudges`)
-- Helps organizers identify attendees who may need extra encouragement
+**Attendance Analysis** (`utils/attendance_utils.py`):
+- Optionally reads attendance data from Google Sheets to analyze past participation
+- Identifies attendees who may benefit from extra encouragement (nudge candidates)
+- When enabled with `--include-nudges`, incorporates nudge suggestions into messages
+- Helps organizers prioritize outreach to attendees with lower attendance rates
 
-The attendance tracking column in the sheet is configurable and data is appended to preserve history.
+The system reads from a configurable attendance column in Google Sheets to perform the analysis.
 
 ## Architecture
 
@@ -129,11 +135,11 @@ The attendance tracking column in the sheet is configurable and data is appended
 **Utilities**:
 - `utils/phone_utils.py` - Phone number normalization and validation
 - `utils/action_network_utils.py` - Event and attendee integration
-- `utils/attendance_utils.py` - Attendance analysis and nudge suggestions
+- `utils/attendance_utils.py` - Attendance analysis and nudge candidate identification
 
 **External Integrations**:
 - `tools/twilio.py` - SMS messaging with group conversation support
-- `tools/google_docs.py` - Document reading and Google Sheets writing
+- `tools/google_docs.py` - Document reading and Google Sheets reading
 
 ### Key Design Principles
 
@@ -182,7 +188,7 @@ The system is designed to run on a cron schedule:
 - OpenAI API for LLM-powered parsing and matching
 - Twilio for SMS/MMS messaging
 - Google Docs API for reading calendar documents
-- Google Sheets API for attendance tracking
+- Google Sheets API for reading attendance data
 - Action Network API for event/attendee data (optional)
 
 **Python Environment**:
