@@ -10,6 +10,35 @@ services:
     env_file:
       - .env
     restart: always
+    networks:
+      - backend
+
+  llm-server:
+    build:
+      context: ./llm_server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_NAME=${LLM_MODEL_NAME:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}
+      - LLM_USERNAME=${LLM_USERNAME:-admin}
+      - LLM_PASSWORD=${LLM_PASSWORD:-password}
+      - PORT=8000
+      - LOG_LEVEL=${LLM_LOG_LEVEL:-INFO}
+    volumes:
+      - llm-cache:/app/.cache/huggingface
+    restart: always
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  llm-cache:
 
 networks:
   backend:

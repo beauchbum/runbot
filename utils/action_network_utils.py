@@ -193,7 +193,7 @@ def match_run_to_action_network_event(
         run_name: Name of the run from calendar
         run_datetime: Datetime of the run (should be in EST/EDT)
         action_network_events: List of Action Network events
-        openai_client: OpenAI client for LLM matching (required)
+        openai_client: LLM client (LocalLLMClient or OpenAI) for LLM matching (required)
         time_window_hours: Time window for matching (hours before/after)
 
     Returns:
@@ -300,7 +300,7 @@ def match_run_to_action_network_event(
 
     # Use LLM to match (required)
     if not openai_client:
-        raise ValueError("OpenAI client is required for event matching")
+        raise ValueError("LLM client is required for event matching")
 
     logger.info(f"   🤖 Using LLM to match run to {len(candidates)} candidate(s)...")
     matched_event = _llm_match_event(openai_client, run_name, run_datetime, candidates)
@@ -321,7 +321,7 @@ def _llm_match_event(openai_client, run_name: str, run_datetime: datetime, candi
     Use LLM to intelligently match a run to candidate Action Network events.
 
     Args:
-        openai_client: OpenAI client
+        openai_client: LLM client (LocalLLMClient or OpenAI)
         run_name: Name of the run from calendar
         run_datetime: Datetime of the run
         candidates: List of candidate event dictionaries with 'event', 'event_start', 'time_diff_hours'

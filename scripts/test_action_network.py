@@ -102,17 +102,20 @@ def list_events():
 
 def test_matching():
     """Test matching a sample run to Action Network events."""
-    from openai import OpenAI
+    from utils.llm_client import LocalLLMClient
 
     logger.info("🧪 Testing run matching...")
 
-    # Initialize OpenAI client (required)
-    openai_api_key = os.getenv('OPENAI_API_KEY')
-    if not openai_api_key:
-        logger.error("❌ OPENAI_API_KEY environment variable is required for LLM matching")
+    # Initialize Local LLM client (required)
+    try:
+        llm_client = LocalLLMClient()
+        if not llm_client.health_check():
+            logger.error("❌ Local LLM server is not healthy")
+            return 1
+        logger.info("✅ Local LLM server is healthy")
+    except ValueError as e:
+        logger.error(f"❌ {e}")
         return 1
-
-    openai_client = OpenAI(api_key=openai_api_key)
 
     # Fetch events
     events = fetch_all_action_network_events(max_pages=3)
@@ -135,7 +138,7 @@ def test_matching():
         run_name=sample_run_name,
         run_datetime=sample_run_datetime,
         action_network_events=events,
-        openai_client=openai_client,
+        openai_client=llm_client,
         time_window_hours=12
     )
 
