@@ -1,189 +1,194 @@
-# BeauchBot - AI Assistant for Event Management
+# RunBot - AI Assistant for Event Management
 
-An intelligent messaging assistant that automates event coordination and communication via SMS. BeauchBot manages contact lists, coordinates with event organizers, sends reminders to attendees, and integrates with calendar and event management systems.
+An intelligent messaging assistant that automates event coordination and communication via SMS. RunBot manages contact lists, coordinates with event organizers, sends reminders to attendees, and integrates with calendar and event management systems.
 
-## Features
+## Overview
 
-- **Automated Event Messaging**: Send personalized reminders to event attendees with organizer contacts included
-- **Smart Deduplication**: Checks message history to avoid duplicate messages about the same event
-- **Calendar Integration**: Parses calendar documents to extract events, times, and organizer assignments
-- **Action Network Integration**: Links calendar events to Action Network for attendee lists and RSVPs
-- **Contact Management**: Validates organizers and attendees against contact directories
-- **Attendance Tracking**: Reads and writes attendance data to Google Sheets
-- **Phone Number Normalization**: Consistent E.164 format (+1XXXXXXXXXX) throughout the system
-- **Group Messaging**: Creates group conversations with event organizers and individual attendees
-- **Scheduled Execution**: Cron-friendly script with dry-run and time simulation for testing
+RunBot automates the workflow of coordinating events by:
+1. Reading calendar documents to identify upcoming events
+2. Extracting organizer assignments from calendar entries
+3. Matching events to Action Network to retrieve attendee lists
+4. Sending personalized group SMS messages to attendees with their assigned organizers
+5. Tracking message history to prevent duplicate notifications
 
-## Setup
+The system runs on a schedule (typically hourly) and intelligently determines which events need reminders based on timing windows and previous message history.
 
-### Environment Variables
+## Workflow Diagram
 
-Create a `.env` file with:
+```mermaid
+flowchart TD
+    Start([Cron Trigger]) --> TimeCheck{Within operating<br/>hours?}
+    TimeCheck -->|No| End([Exit])
+    TimeCheck -->|Yes| LoadCalendar[Load Calendar Document<br/>from Google Docs]
+
+    LoadCalendar --> ParseEvents[LLM: Parse Events<br/>Extract names, times, organizers]
+
+    ParseEvents --> FilterEvents{Events within<br/>time window?}
+    FilterEvents -->|No events| End
+    FilterEvents -->|Yes| MatchAction[Match Events to<br/>Action Network]
+
+    MatchAction --> GetAttendees[Retrieve Attendee Lists<br/>with Phone Numbers]
+
+    GetAttendees --> ValidateContacts[Validate Contacts<br/>against Phone Directory]
+
+    ValidateContacts --> LoopEvents{For each event}
+
+    LoopEvents --> LoopAttendees{For each attendee}
+
+    LoopAttendees --> FetchHistory[Fetch Message History<br/>for Attendee]
+
+    FetchHistory --> CheckDupe{LLM: Already<br/>messaged about<br/>this event?}
+
+    CheckDupe -->|Yes| LoopAttendees
+    CheckDupe -->|No| GetOrganizers[Get Assigned Organizers<br/>for this Event]
+
+    GetOrganizers --> CreateGroup[Create/Find Group<br/>Conversation]
+
+    CreateGroup --> SendMessage[Send Group SMS<br/>Attendee + Organizers]
+
+    SendMessage --> UpdateAttendance{Attendance<br/>tracking enabled?}
+    UpdateAttendance -->|Yes| WriteSheet[Write Attendance Data<br/>to Google Sheets]
+    UpdateAttendance -->|No| LoopAttendees
+    WriteSheet --> LoopAttendees
+
+    LoopAttendees -->|More attendees| LoopAttendees
+    LoopAttendees -->|Done| LoopEvents
+
+    LoopEvents -->|More events| LoopAttendees
+    LoopEvents -->|Done| End
+
+    style Start fill:#e1f5e1
+    style End fill:#ffe1e1
+    style SendMessage fill:#e1e5ff
+    style CheckDupe fill:#fff9e1
+    style ParseEvents fill:#f0e1ff
+```
+
+## How It Works
+
+### Event Detection & Parsing
+
+The main workflow starts in `scripts/main.py`, which orchestrates the entire messaging pipeline. The script uses an LLM to parse calendar documents stored in Google Docs, extracting:
+
+- **Event names and times** - Identifies when events are happening
+- **Organizer assignments** - Parses patterns like "BL: (H) John (T) Jane" to determine which organizers are responsible for each event
+- **Date and location details** - Contextual information for messaging
+
+The LLM-powered parsing allows for flexible calendar formats rather than requiring rigid structured data.
+
+### Contact & Attendee Management
+
+**Contact Directory Integration** (`utils/phone_utils.py`):
+- Maintains a contact directory in a Google Doc with name-to-phone-number mappings
+- Normalizes all phone numbers to E.164 format (+1XXXXXXXXXX) for consistency
+- Handles various input formats: (555) 123-4567, 555-123-4567, +15551234567, etc.
+- Validates organizers and attendees against the directory
+
+**Action Network Integration** (`utils/action_network_utils.py`):
+- Links calendar events to Action Network events by matching event names
+- Retrieves RSVP lists and attendee information
+- Provides structured attendee data including phone numbers and contact details
+
+### Intelligent Messaging
+
+**Message Deduplication**:
+- Fetches message history on-demand from Twilio for specific attendees
+- Uses LLM to analyze conversation content and determine if an event has already been mentioned
+- Prevents duplicate notifications even across different group conversations
+- Tracks both individual and group message contexts
+
+**Group Conversation Management** (`tools/twilio.py`):
+- Creates group MMS conversations with multiple recipients
+- Each message includes the attendee plus their assigned organizers
+- Reuses existing conversations when sending to the same group of people
+- Formats messages with event details, time, location, and organizer contacts
+
+**Time-Based Execution**:
+- Operates only during configured hours (default: 8 AM - 8 PM)
+- Processes events within a configurable time window (e.g., next 72 hours)
+- Can simulate different times for testing purposes (`--simulate-time`)
+- Supports dry-run mode for testing without sending actual messages (`--dry-run`)
+
+### Attendance Tracking
+
+**Google Sheets Integration** (`utils/attendance_utils.py`):
+- Reads attendance data from Google Sheets to track who attended past events
+- Writes new attendance records automatically after events
+- Provides optional attendance-based nudge suggestions (`--include-nudges`)
+- Helps organizers identify attendees who may need extra encouragement
+
+The attendance tracking column in the sheet is configurable and data is appended to preserve history.
+
+## Architecture
+
+### Core Components
+
+**Workflow Orchestrator**:
+- `scripts/main.py` - Main entry point that coordinates all operations
+
+**Utilities**:
+- `utils/phone_utils.py` - Phone number normalization and validation
+- `utils/action_network_utils.py` - Event and attendee integration
+- `utils/attendance_utils.py` - Attendance analysis and nudge suggestions
+
+**External Integrations**:
+- `tools/twilio.py` - SMS messaging with group conversation support
+- `tools/google_docs.py` - Document reading and Google Sheets writing
+
+### Key Design Principles
+
+**LLM-Powered Flexibility**:
+- Uses OpenAI's API to parse unstructured calendar documents
+- Intelligently matches names to contacts, handling variations and nicknames
+- Analyzes message history semantically rather than with rigid pattern matching
+
+**Efficiency Optimizations**:
+- On-demand message history fetching (only queries Twilio when needed for deduplication)
+- Conversation reuse to minimize API calls
+- Smart caching of contact directories and event data
+
+**Reliability Features**:
+- Phone number normalization ensures consistent formatting throughout
+- Group conversation support with automatic fallback
+- Dry-run mode for safe testing
+- Comprehensive logging for debugging and monitoring
+
+## Usage Examples
 
 ```bash
-# OpenAI (required)
-OPENAI_API_KEY=your_openai_api_key
+# Standard execution (sends messages for upcoming events)
+python scripts/main.py
 
-# Twilio (required)
-TWILIO_ACCOUNT_SID=your_account_sid
-TWILIO_AUTH_TOKEN=your_auth_token
-TWILIO_PHONE_NUMBER=+15551234567
-MY_PHONE_NUMBER=+15559876543
+# Test without sending messages
+python scripts/main.py --dry-run
 
-# Google (required - Base64 encoded service account JSON)
-GOOGLE_SERVICE_ACCOUNT_B64=your_encoded_service_account
+# Simulate running at a different time
+python scripts/main.py --simulate-time "2024-01-15,09:00"
 
-# Contact Directory (required - Google Doc ID)
-PHONE_DIRECTORY_DOC_ID=your_phone_directory_document_id
-
-# Attendance Tracking (optional - Google Sheets ID)
-ATTENDANCE_SHEET_ID=your_attendance_google_sheets_id
-
-# Action Network (optional - for event/attendee integration)
-ACTION_NETWORK_API_KEY=your_action_network_api_key
-
-# Organizer Filtering (optional - comma-separated list)
-ALLOWED_BLS=John Smith,Jane Doe
-```
-
-**Note**: All phone numbers should be in E.164 format (+1XXXXXXXXXX), though the system will normalize various formats automatically.
-
-### Installation
-
-```shell
-# Using uv (recommended)
-uv sync --no-editable
-
-# Or with pip
-pip install -r requirements.txt
-```
-
-### Docker
-
-```shell
-docker-compose up --build
-```
-
-## Usage
-
-### Scheduled Event Messaging
-
-The main workflow automatically:
-1. Identifies upcoming events from calendar documents
-2. Extracts organizer assignments
-3. Matches events to Action Network for attendee lists
-4. Sends personalized group messages to attendees with organizers included
-5. Tracks message history to prevent duplicates
-
-```bash
-# Run the messaging workflow
-python scripts/ping_agent.py
-
-# Dry run mode (no actual messages sent)
-python scripts/ping_agent.py --dry-run
-
-# Simulate a specific time for testing
-python scripts/ping_agent.py --simulate-time "2024-01-15,09:00"
-
-# Include attendance-based nudge suggestions
-python scripts/ping_agent.py --include-nudges
+# Include attendance-based suggestions
+python scripts/main.py --include-nudges
 ```
 
 ### Automated Scheduling
 
-Add to crontab for hourly execution:
+The system is designed to run on a cron schedule:
 ```bash
-0 * * * * cd /path/to/beauchbot && python scripts/ping_agent.py >> /var/log/beauchbot.log 2>&1
+0 * * * * cd /path/to/runbot && python scripts/main.py >> /var/log/runbot.log 2>&1
 ```
 
-**Note**: The script only runs during operating hours (8 AM - 8 PM) and processes events within a configurable time window.
+## Dependencies
 
-## Configuration
+**External Services**:
+- OpenAI API for LLM-powered parsing and matching
+- Twilio for SMS/MMS messaging
+- Google Docs API for reading calendar documents
+- Google Sheets API for attendance tracking
+- Action Network API for event/attendee data (optional)
 
-### Google Service Account
-
-1. Create a service account in [Google Cloud Console](https://console.cloud.google.com/)
-2. Enable Google Docs API and Google Sheets API
-3. Create and download service account JSON key
-4. Base64 encode the JSON and set as `GOOGLE_SERVICE_ACCOUNT_B64`
-
-```bash
-base64 -i service-account.json | tr -d '\n'
-```
-
-### Contact Directory
-
-Create a Google Doc with contacts in the format:
-```
-Name: Phone Number
-John Smith: +15551234567
-Jane Doe: (555) 987-6543
-Bob Wilson: 555-111-2222
-```
-
-Share the document with your service account email (viewer access) and set the document ID in `PHONE_DIRECTORY_DOC_ID`.
-
-**Note**: Phone numbers can be in any common format - they will be normalized automatically.
-
-### Calendar Documents
-
-Calendar documents should contain event information including:
-- Event names and times
-- Organizer assignments (e.g., "BL: (H) John (T) Jane")
-- Date and location details
-
-The LLM will intelligently parse the calendar structure to extract events and assignments.
-
-### Attendance Tracking (Optional)
-
-Set `ATTENDANCE_SHEET_ID` to enable writing attendance data to Google Sheets. The sheet will be automatically populated with:
-- Event dates
-- Event names
-- Attendee lists
-
-## Architecture
-
-**Core Components**:
-- `scripts/ping_agent.py` - Main workflow orchestrator
-- `utils/phone_utils.py` - Phone number normalization and validation
-- `utils/action_network_utils.py` - Event and attendee integration
-- `utils/attendance_utils.py` - Attendance analysis and nudge suggestions
-- `tools/twilio.py` - SMS messaging with group conversation support
-- `tools/google_docs.py` - Document reading and sheet writing
-
-**Key Features**:
-- LLM-powered calendar parsing and name matching
-- On-demand message history fetching for efficiency
-- Smart deduplication across multiple conversations
-- Group MMS support with automatic conversation reuse
-
-## Development
-
-### Testing
-
-```bash
-# Test phone number normalization
-python scripts/test_phone_normalization.py
-
-# Test message history fetching
-python scripts/test_message_history.py +15551234567
-
-# Test Action Network integration
-python scripts/test_action_network.py
-```
-
-### Dependencies
-
-```bash
-# Add new package
-uv add package-name
-
-# Update all dependencies
-uv sync --upgrade --no-editable
-
-# Run scripts
-uv run python scripts/ping_agent.py
-```
+**Python Environment**:
+- Managed with `uv` for fast, reliable dependency resolution
+- Uses `python-dotenv` for environment configuration
+- Built on `openai`, `twilio`, and `google-api-python-client` SDKs
 
 ## License
 
