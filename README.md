@@ -38,7 +38,9 @@ flowchart TD
 
     LoadAttendance --> AnalyzeNudges[Analyze Attendance History<br/>Identify Nudge Candidates<br/>for this event]
 
-    AnalyzeNudges --> LoopAttendees{For each attendee}
+    AnalyzeNudges --> SendNudgeMessage[Send BLs list of nudge suggestions]
+    
+    SendNudgeMessage --> LoopAttendees{For each attendee}
 
     LoopAttendees --> FetchHistory[Fetch Message History<br/>for Attendee]
 
@@ -47,9 +49,7 @@ flowchart TD
     CheckDupe -->|Yes| NextAttendee[Skip to next attendee]
     CheckDupe -->|No| GetOrganizers[Get Assigned Organizers<br/>for this Event]
 
-    GetOrganizers --> CreateGroup[Create/Find Group<br/>Conversation]
-
-    CreateGroup --> SendMessage[Send Group SMS<br/>Attendee + Organizers<br/>+ Nudge Info if applicable]
+    GetOrganizers --> SendMessage[Send Group SMS<br/>Attendee + Organizers<br/>]
 
     SendMessage --> NextAttendee
     NextAttendee --> LoopAttendees
