@@ -62,6 +62,7 @@ flowchart TD
     style Start fill:#e1f5e1
     style End fill:#ffe1e1
     style SendMessage fill:#e1e5ff
+    style SendNudgeMessage fill:#e1e5ff
     style CheckDupe fill:#fff9e1
     style ParseEvents fill:#f0e1ff
     style AnalyzeNudges fill:#ffe1f5
