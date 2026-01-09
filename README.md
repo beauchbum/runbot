@@ -18,9 +18,7 @@ The system runs on a schedule (typically hourly) and intelligently determines wh
 
 ```mermaid
 flowchart TD
-    Start([Cron Trigger]) --> TimeCheck{Within operating<br/>hours?}
-    TimeCheck -->|No| End([Exit])
-    TimeCheck -->|Yes| LoadCalendar[Load Calendar Document<br/>from Google Docs]
+    Start([Cron Trigger]) --> LoadCalendar[Load Calendar Document<br/>from Google Docs]
 
     LoadCalendar --> ParseEvents[LLM: Parse Events<br/>Extract names, times, organizers]
 
@@ -30,17 +28,17 @@ flowchart TD
 
     MatchAction --> GetAttendees[Retrieve Attendee Lists<br/>with Phone Numbers]
 
-    GetAttendees --> CheckNudges{Include nudges<br/>flag enabled?}
-    CheckNudges -->|Yes| LoadAttendance[Load Attendance Data<br/>from Google Sheets]
-    CheckNudges -->|No| ValidateContacts
-
-    LoadAttendance --> AnalyzeNudges[Analyze Attendance History<br/>Identify Nudge Candidates]
-
-    AnalyzeNudges --> ValidateContacts[Validate Contacts<br/>against Phone Directory]
+    GetAttendees --> ValidateContacts[Validate Contacts<br/>against Phone Directory]
 
     ValidateContacts --> LoopEvents{For each event}
 
-    LoopEvents --> LoopAttendees{For each attendee}
+    LoopEvents --> CheckNudges{Include nudges<br/>flag enabled?}
+    CheckNudges -->|Yes| LoadAttendance[Load Attendance Data<br/>from Google Sheets]
+    CheckNudges -->|No| LoopAttendees
+
+    LoadAttendance --> AnalyzeNudges[Analyze Attendance History<br/>Identify Nudge Candidates<br/>for this event]
+
+    AnalyzeNudges --> LoopAttendees{For each attendee}
 
     LoopAttendees --> FetchHistory[Fetch Message History<br/>for Attendee]
 
@@ -56,7 +54,6 @@ flowchart TD
     SendMessage --> NextAttendee
     NextAttendee --> LoopAttendees
 
-    LoopAttendees -->|More attendees| LoopAttendees
     LoopAttendees -->|Done| LoopEvents
 
     LoopEvents -->|More events| LoopAttendees
