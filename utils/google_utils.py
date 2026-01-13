@@ -7,7 +7,6 @@ Provides shared functionality for Google APIs:
 - Document text extraction
 """
 
-import os
 import json
 import base64
 import logging
@@ -17,6 +16,9 @@ from typing import Dict, Any
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+# Import utilities
+from utils.config_utils import require_variable
 
 logger = logging.getLogger(__name__)
 
@@ -30,36 +32,29 @@ SCOPES = [
 
 def _get_service_account_credentials():
     """
-    Get Google service account credentials from environment variable.
-    
+    Get Google service account credentials from configuration.
+
     Returns:
         service_account.Credentials object
-        
+
     Raises:
         ValueError: If credentials cannot be loaded
     """
-    service_account_b64 = os.getenv('GOOGLE_SERVICE_ACCOUNT_B64')
-    
-    if not service_account_b64:
-        raise ValueError(
-            "GOOGLE_SERVICE_ACCOUNT_B64 environment variable is required. "
-            "Run 'python scripts/encode_service_account.py path/to/service-account.json' "
-            "to generate the base64 encoded service account JSON."
-        )
-    
+    service_account_b64 = require_variable('google_service_account_b64')
+
     try:
         # Decode base64 and parse JSON
         service_account_json = base64.b64decode(service_account_b64).decode('utf-8')
         service_account_info = json.loads(service_account_json)
-        
+
         # Create credentials
         creds = service_account.Credentials.from_service_account_info(
             service_account_info, scopes=SCOPES)
-        
+
         logger.debug(f"Using service account: {service_account_info.get('client_email', 'unknown')}")
-        
+
         return creds
-        
+
     except Exception as e:
         raise ValueError(f"Failed to decode service account credentials: {e}")
 

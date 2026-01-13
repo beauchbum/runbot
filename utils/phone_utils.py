@@ -10,10 +10,11 @@ All phone numbers in this project are normalized to E.164 format: +1XXXXXXXXXX
 where +1 is the US country code and X represents 10 digits.
 """
 
-import os
 import re
 import logging
 from typing import Dict, List, Optional, Tuple
+
+from utils.config_utils import require_variable
 
 logger = logging.getLogger(__name__)
 
@@ -161,36 +162,32 @@ def parse_phone_numbers_from_text(text_content: str) -> List[Dict[str, str]]:
 def get_allowed_contacts() -> List[Dict[str, str]]:
     """
     Get the list of allowed contacts from the phone directory document.
-    
+
     Returns:
         List of contacts with 'name' and 'phone_number' keys, or empty list on error
     """
     try:
         # Import here to avoid circular imports
         from utils.google_utils import get_google_docs_service, extract_text_from_document
-        
-        # Get the phone directory document ID from environment variable 
-        phone_directory_doc_id = os.getenv('PHONE_DIRECTORY_DOC_ID')
-        
-        if not phone_directory_doc_id:
-            logger.error("PHONE_DIRECTORY_DOC_ID environment variable not set")
-            return []
-        
+
+        # Get the phone directory document ID from configuration
+        phone_directory_doc_id = require_variable('phone_directory_doc_id')
+
         # Get the Google Docs service
         service = get_google_docs_service()
-        
+
         # Retrieve the document
         document = service.documents().get(documentId=phone_directory_doc_id).execute()
 
         # Extract text content
         text_content = extract_text_from_document(document)
-        
+
         # Parse the text content to extract contacts
         contacts = parse_phone_numbers_from_text(text_content)
-        
+
         logger.info(f"Retrieved {len(contacts)} allowed contacts from phone directory")
         return contacts
-        
+
     except Exception as e:
         logger.error(f"Error retrieving allowed contacts: {e}")
         return []
