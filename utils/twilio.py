@@ -9,7 +9,6 @@ Provides functionality to:
 All phone numbers are normalized to E.164 format (+1XXXXXXXXXX) for consistency.
 """
 
-import os
 import logging
 import re
 from typing import List, Dict, Any
@@ -20,7 +19,8 @@ from agents import function_tool
 # Twilio
 from twilio.rest import Client
 
-# Import shared phone utilities
+# Import shared utilities
+from utils.config_utils import require_variable
 from utils.phone_utils import validate_phone_numbers_against_contacts, format_contact_list_for_error, normalize_phone_number
 
 logger = logging.getLogger(__name__)
@@ -31,58 +31,47 @@ logging.getLogger('twilio.http_client').setLevel(logging.WARNING)
 
 
 def get_twilio_client():
-    """Initialize and return a Twilio client using environment variables."""
-    account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-    auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-    
-    if not account_sid or not auth_token:
-        raise ValueError(
-            "TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN environment variables are required"
-        )
-    
+    """Initialize and return a Twilio client using configuration variables."""
+    account_sid = require_variable('twilio_account_sid')
+    auth_token = require_variable('twilio_auth_token')
+
     return Client(account_sid, auth_token)
 
 
 def get_twilio_phone_number() -> str:
     """
-    Get the Twilio phone number from environment variables.
+    Get the Twilio phone number from configuration.
 
     Returns:
         Normalized phone number in E.164 format (+1XXXXXXXXXX)
 
     Raises:
-        ValueError: If environment variable is not set or phone number is invalid
+        ValueError: If configuration variable is not set or phone number is invalid
     """
-    twilio_number = os.getenv('TWILIO_PHONE_NUMBER')
-
-    if not twilio_number:
-        raise ValueError("TWILIO_PHONE_NUMBER environment variable is required")
+    twilio_number = require_variable('twilio_phone_number')
 
     try:
         return normalize_phone_number(twilio_number)
     except ValueError as e:
-        raise ValueError(f"Invalid TWILIO_PHONE_NUMBER: {e}")
+        raise ValueError(f"Invalid twilio_phone_number: {e}")
 
 
 def get_my_phone_number() -> str:
     """
-    Get my personal phone number from environment variables.
+    Get my personal phone number from configuration.
 
     Returns:
         Normalized phone number in E.164 format (+1XXXXXXXXXX)
 
     Raises:
-        ValueError: If environment variable is not set or phone number is invalid
+        ValueError: If configuration variable is not set or phone number is invalid
     """
-    my_number = os.getenv('MY_PHONE_NUMBER')
-
-    if not my_number:
-        raise ValueError("MY_PHONE_NUMBER environment variable is required")
+    my_number = require_variable('my_phone_number')
 
     try:
         return normalize_phone_number(my_number)
     except ValueError as e:
-        raise ValueError(f"Invalid MY_PHONE_NUMBER: {e}")
+        raise ValueError(f"Invalid my_phone_number: {e}")
 
 
 def send_text(to_numbers: List[str], message: str) -> Dict[str, Any]:

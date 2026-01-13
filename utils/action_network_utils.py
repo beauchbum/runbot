@@ -7,7 +7,6 @@ Provides read-only functionality to:
 - Query event details by name, date, and location
 """
 
-import os
 import logging
 import requests
 from datetime import datetime, timedelta
@@ -15,7 +14,8 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Import phone normalization utilities
+# Import utilities
+from utils.config_utils import require_variable
 from utils.phone_utils import normalize_phone_number
 
 # Action Network API base URL
@@ -30,11 +30,9 @@ def get_action_network_headers() -> Dict[str, str]:
         Dictionary with required headers including API token
 
     Raises:
-        ValueError: If ACTION_NETWORK_API_KEY is not set
+        ValueError: If action_network_api_key is not set
     """
-    api_key = os.getenv('ACTION_NETWORK_API_KEY')
-    if not api_key:
-        raise ValueError("ACTION_NETWORK_API_KEY environment variable is required")
+    api_key = require_variable('action_network_api_key')
 
     return {
         'OSDI-API-Token': api_key
@@ -66,7 +64,14 @@ def fetch_action_network_events(page: int = 1, per_page: int = 25) -> Dict[str, 
     logger.info(f"📡 Fetching Action Network events (page {page}, per_page {per_page})...")
     logger.info(f"   Request URL: {url}")
     logger.info(f"   Request headers: {', '.join(headers.keys())}")
-    logger.info(f"   API key length: {len(os.getenv('ACTION_NETWORK_API_KEY', ''))} characters")
+    # Log API key length for debugging (without exposing the key)
+    try:
+        from utils.config_utils import get_variable
+        api_key = get_variable('action_network_api_key')
+        api_key_len = len(api_key) if api_key else 0
+    except:
+        api_key_len = 0
+    logger.info(f"   API key length: {api_key_len} characters")
 
     try:
         response = requests.get(url, headers=headers, params=params)
@@ -332,8 +337,11 @@ def _llm_match_event(openai_client, run_name: str, run_datetime: datetime, candi
     import json
 
     # Format run information
-    run_info = f"""Run Name: {run_name}
-Run Time: {run_datetime.strftime('%Y-%m-%d %I:%M %p %Z')}"""
+    run_info = """Run Name: {run_name}
+Run Time: {run_time}""".format(
+        run_name=run_name,
+        run_time=run_datetime.strftime('%Y-%m-%d %I:%M %p %Z')
+    )
 
     # Format candidates for LLM
     candidate_list = []
@@ -341,11 +349,17 @@ Run Time: {run_datetime.strftime('%Y-%m-%d %I:%M %p %Z')}"""
         event = candidate['event']
         event_start = candidate['event_start']
 
-        event_info = f"""Candidate {i}:
-  Title: {event['title'] or event['name']}
-  Start Time: {event_start.strftime('%Y-%m-%d %I:%M %p %Z')}
-  Time Difference: {candidate['time_diff_hours']:.1f} hours
-  Event ID: {event['id']}"""
+        event_info = """Candidate {i}:
+  Title: {title}
+  Start Time: {start_time}
+  Time Difference: {time_diff:.1f} hours
+  Event ID: {event_id}""".format(
+            i=i,
+            title=event['title'] or event['name'],
+            start_time=event_start.strftime('%Y-%m-%d %I:%M %p %Z'),
+            time_diff=candidate['time_diff_hours'],
+            event_id=event['id']
+        )
 
         location = event.get('location', {})
         if location:
@@ -354,18 +368,18 @@ Run Time: {run_datetime.strftime('%Y-%m-%d %I:%M %p %Z')}"""
             region = location.get('region')
             if venue or locality or region:
                 loc_parts = [p for p in [venue, locality, region] if p]
-                event_info += f"\n  Location: {', '.join(loc_parts)}"
+                event_info += "\n  Location: {location}".format(location=', '.join(loc_parts))
 
         if event.get('description'):
             # Truncate description to avoid token limits
             desc = event['description'][:200]
-            event_info += f"\n  Description: {desc}..."
+            event_info += "\n  Description: {desc}...".format(desc=desc)
 
         candidate_list.append(event_info)
 
     candidates_text = "\n\n".join(candidate_list)
 
-    prompt = f"""You are matching a calendar run event to Action Network events.
+    prompt = """You are matching a calendar run event to Action Network events.
 
 TARGET RUN:
 {run_info}
@@ -382,7 +396,10 @@ Analyze the candidates and determine which one (if any) best matches the target 
 If there is a clear match, respond with ONLY the candidate number (e.g., "1", "2", etc.).
 If there is no good match or the candidates are ambiguous, respond with exactly "NONE".
 
-Your response must be a single word: either a number or "NONE"."""
+Your response must be a single word: either a number or "NONE".""".format(
+        run_info=run_info,
+        candidates_text=candidates_text
+    )
 
     try:
         response = openai_client.chat.completions.create(

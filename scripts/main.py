@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Ping Agent Script for BeauchBot - Cron Job Entry Point
+Ping Agent Script for BeauchBot - Windmill Compatible
 
-This script is designed to be run as a cron job (e.g., hourly).
+This script is designed to run as a Windmill workflow.
 It performs the following workflow for upcoming runs:
 1. Identify and read the calendar document
 2. Find runs happening within 3 hours
@@ -12,31 +12,18 @@ It performs the following workflow for upcoming runs:
 6. Check conversation history between BLs and attendees
 7. Send group messages to attendees (with BLs included)
 
-Environment Variables Required:
-- OPENAI_API_KEY: OpenAI API key for the LLM
-- GOOGLE_SERVICE_ACCOUNT_B64: Base64 encoded Google service account JSON
-- PHONE_DIRECTORY_DOC_ID: Google Doc ID containing contact information
-- ACTION_NETWORK_API_KEY: Action Network API key for event linking
-- TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER: For messaging
-- ATTENDANCE_SHEET_ID: Google Sheets ID for attendance tracking (optional, for nudges)
-- ALLOWED_BLS: Comma-separated list of BL names to allow (optional, if not set all BLs are allowed)
-
-Usage:
-    python scripts/ping_agent.py                                    # Execute with current Eastern time
-    python scripts/ping_agent.py --dry-run                          # Dry run (no actual messages sent)
-    python scripts/ping_agent.py --simulate-time "2024-01-15,09:00" # Test with simulated time (9 AM EST)
-    python scripts/ping_agent.py -t "2024-12-25"                    # Test Christmas day (midnight EST)
-    python scripts/ping_agent.py --include-nudges                   # Include attendance-based nudge analysis
-    python scripts/ping_agent.py -d -n                              # Dry run with nudge analysis enabled
-
-Typical cron entry (runs every hour):
-    0 * * * * cd /path/to/beauchbot && python scripts/ping_agent.py >> /var/log/beauchbot_cron.log 2>&1
+Windmill Variables Required (in f/run_club folder):
+- openai_api_key: OpenAI API key for the LLM
+- google_service_account_b64: Base64 encoded Google service account JSON
+- phone_directory_doc_id: Google Doc ID containing contact information
+- action_network_api_key: Action Network API key for event linking
+- twilio_account_sid, twilio_auth_token, twilio_phone_number: For messaging
+- attendance_sheet_id: Google Sheets ID for attendance tracking (optional, for nudges)
+- allowed_bls: Comma-separated list of BL names to allow (optional, if not set all BLs are allowed)
 """
 
-import argparse
 import json
 import logging
-import os
 import re
 import sys
 from datetime import datetime, timedelta
@@ -49,6 +36,7 @@ from openai import OpenAI
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from utils.config_utils import get_variable, require_variable
 from utils.twilio import get_all_messages_to_phone_number, send_text
 from utils.action_network_utils import (
     fetch_all_action_network_events,
@@ -93,9 +81,9 @@ def identify_calendar_doc(client: OpenAI, available_docs: List[Dict[str, Any]], 
     current_month = current_time.strftime('%B')
     current_year = current_time.strftime('%Y')
 
-    prompt = f"""You are helping identify which Google Document is the calendar/schedule document for the current month.
+    prompt = """You are helping identify which Google Document is the calendar/schedule document for the current month.
 
-Current date/time: {current_time.strftime('%Y-%m-%d %I:%M %p %Z')}
+Current date/time: {current_datetime}
 Current month: {current_month} {current_year}
 
 Here are the available documents:
@@ -105,7 +93,12 @@ Based on the document names, identify the calendar/schedule document for {curren
 Look for documents with names like "{current_month} {current_year} Calendar", "{current_month} Calendar", etc.
 
 If you cannot find an appropriate calendar document for {current_month} {current_year}, respond with exactly "NONE".
-Otherwise, respond with ONLY the document ID, nothing else."""
+Otherwise, respond with ONLY the document ID, nothing else.""".format(
+        current_datetime=current_time.strftime('%Y-%m-%d %I:%M %p %Z'),
+        current_month=current_month,
+        current_year=current_year,
+        doc_list=doc_list
+    )
 
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -131,7 +124,7 @@ def parse_runs_from_calendar(client: OpenAI, calendar_text: str, current_time: d
     current_month = current_time.strftime('%B')
     current_year = current_time.year
 
-    prompt = f"""You are parsing a monthly calendar document to extract ALL runs.
+    prompt = """You are parsing a monthly calendar document to extract ALL runs.
 
 Current month/year: {current_month} {current_year}
 
@@ -187,7 +180,11 @@ Respond with ONLY a JSON array. Each run should have:
 - "full_text": The complete text block for this run including BL section
 
 If no runs found, respond with [].
-Example: [{{"time": "{current_year}-12-02T19:00:00-05:00", "name": "Office Loop", "bls": ["Gareth", "Nic L"], "full_text": "Office Loop 7 PM\\nBL: (H) Gareth\\n(T) Nic L"}}]"""
+Example: [{{"time": "{current_year}-12-02T19:00:00-05:00", "name": "Office Loop", "bls": ["Gareth", "Nic L"], "full_text": "Office Loop 7 PM\\nBL: (H) Gareth\\n(T) Nic L"}}]""".format(
+        current_month=current_month,
+        current_year=current_year,
+        calendar_text=calendar_text
+    )
 
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -239,9 +236,295 @@ def filter_runs_by_time_window(runs: List[Dict[str, Any]], current_time: datetim
     return filtered_runs
 
 
+def filter_action_network_events_by_time_window(
+    events: List[Dict[str, Any]],
+    current_time: datetime,
+    hours: int = 10
+) -> List[Dict[str, Any]]:
+    """
+    Filter Action Network events to only those occurring within the specified time window.
+
+    Args:
+        events: List of Action Network events
+        current_time: Current datetime
+        hours: Number of hours to look ahead (default: 10)
+
+    Returns:
+        List of filtered events with parsed datetime added
+    """
+    eastern_tz = ZoneInfo("America/New_York")
+
+    # Ensure current_time is in Eastern timezone
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=eastern_tz)
+    else:
+        current_time = current_time.astimezone(eastern_tz)
+
+    cutoff_time = current_time + timedelta(hours=hours)
+
+    filtered_events = []
+    for event in events:
+        event_start_str = event.get('start_date')
+
+        if not event_start_str:
+            continue
+
+        try:
+            # Parse Action Network datetime
+            if 'T' in event_start_str:
+                # Has time component
+                event_start_str_clean = event_start_str.replace('Z', '')
+
+                if '+' in event_start_str_clean or event_start_str_clean.endswith(('-00:00', '-05:00', '-04:00')):
+                    # Has timezone info
+                    event_start = datetime.fromisoformat(event_start_str_clean)
+                else:
+                    # No timezone info - assume Eastern
+                    event_start = datetime.fromisoformat(event_start_str_clean)
+                    event_start = event_start.replace(tzinfo=eastern_tz)
+
+                # Convert to Eastern for comparison
+                event_start = event_start.astimezone(eastern_tz)
+            else:
+                # Date only - treat as midnight Eastern
+                event_start = datetime.fromisoformat(event_start_str)
+                event_start = event_start.replace(tzinfo=eastern_tz)
+
+            # Check if within time window
+            if current_time <= event_start <= cutoff_time:
+                # Add parsed datetime to event
+                event_with_time = event.copy()
+                event_with_time['parsed_start_time'] = event_start
+                filtered_events.append(event_with_time)
+
+                event_title = event.get('title', event.get('name', 'Unknown'))
+                total_accepted = event.get('total_accepted', 0)
+                logger.info(f"Including event: {event_title} at {event_start.strftime('%Y-%m-%d %I:%M %p')} ({total_accepted} RSVPs)")
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Skipping event with invalid time format: {event.get('title', 'Unknown')} - {e}")
+            continue
+
+    logger.info(f"Found {len(filtered_events)} Action Network events within {hours}-hour window")
+    return filtered_events
+
+
+def match_action_network_event_to_calendar_run(
+    client: OpenAI,
+    event: Dict[str, Any],
+    event_start_time: datetime,
+    calendar_runs: List[Dict[str, Any]],
+    time_window_hours: int = 12
+) -> Optional[Dict[str, Any]]:
+    """
+    Match an Action Network event to a calendar run to find the BLs.
+
+    Strategy:
+    1. Filter calendar runs within the time window
+    2. Use LLM to intelligently match based on name, time, location, and context
+    3. Return matched calendar run with BLs or None
+
+    Args:
+        client: OpenAI client for LLM matching
+        event: Action Network event dictionary
+        event_start_time: Parsed datetime of the event
+        calendar_runs: List of all calendar runs
+        time_window_hours: Time window for matching (hours before/after)
+
+    Returns:
+        Matched calendar run dictionary with BLs or None if no match found
+    """
+    event_title = event.get('title', event.get('name', 'Unknown'))
+    logger.info(f"🔍 Matching Action Network event '{event_title}' to calendar runs...")
+
+    # Define time window
+    time_start = event_start_time - timedelta(hours=time_window_hours)
+    time_end = event_start_time + timedelta(hours=time_window_hours)
+
+    logger.info(f"   Time window: {time_start.strftime('%Y-%m-%d %I:%M %p %Z')} to {time_end.strftime('%Y-%m-%d %I:%M %p %Z')}")
+
+    # Filter calendar runs within time window
+    candidates = []
+    for run in calendar_runs:
+        try:
+            run_time_str = run.get('time', '')
+            if not run_time_str:
+                continue
+
+            run_time = datetime.fromisoformat(run_time_str)
+
+            # Check if within time window
+            if time_start <= run_time <= time_end:
+                time_diff_hours = abs((run_time - event_start_time).total_seconds() / 3600)
+
+                candidates.append({
+                    'run': run,
+                    'run_time': run_time,
+                    'time_diff_hours': time_diff_hours
+                })
+
+                bl_count = len(run.get('bls', []))
+                logger.info(f"   📋 Candidate: '{run.get('name')}'")
+                logger.info(f"      Time: {run_time.strftime('%Y-%m-%d %I:%M %p %Z')}")
+                logger.info(f"      Time diff: {time_diff_hours:.1f} hours")
+                logger.info(f"      BLs: {bl_count}")
+
+        except (ValueError, TypeError) as e:
+            logger.warning(f"   ⚠️  Could not parse calendar run time '{run_time_str}': {e}")
+            continue
+
+    if not candidates:
+        logger.info(f"   ❌ No calendar runs found within time window")
+        return None
+
+    # Use LLM to match
+    logger.info(f"   🤖 Using LLM to match event to {len(candidates)} candidate(s)...")
+    matched_run = _llm_match_event_to_run(client, event, event_start_time, candidates)
+
+    if matched_run:
+        logger.info(f"   ✅ MATCH FOUND: '{matched_run.get('name')}'")
+        bl_count = len(matched_run.get('bls', []))
+        logger.info(f"      BLs: {bl_count}")
+        if matched_run.get('bls'):
+            logger.info(f"      BL names: {', '.join(matched_run.get('bls', []))}")
+    else:
+        logger.info(f"   ❌ No suitable match found")
+
+    return matched_run
+
+
+def _llm_match_event_to_run(
+    client: OpenAI,
+    event: Dict[str, Any],
+    event_start_time: datetime,
+    candidates: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """
+    Use LLM to intelligently match an Action Network event to calendar run candidates.
+
+    Args:
+        client: OpenAI client
+        event: Action Network event dictionary
+        event_start_time: Parsed datetime of the event
+        candidates: List of candidate run dictionaries with 'run', 'run_time', 'time_diff_hours'
+
+    Returns:
+        Matched calendar run or None
+    """
+    # Format event information
+    event_title = event.get('title', event.get('name', 'Unknown'))
+    event_info = """Event Title: {event_title}
+Event Time: {event_time}""".format(
+        event_title=event_title,
+        event_time=event_start_time.strftime('%Y-%m-%d %I:%M %p %Z')
+    )
+
+    location = event.get('location', {})
+    if location:
+        venue = location.get('venue')
+        locality = location.get('locality')
+        region = location.get('region')
+        if venue or locality or region:
+            loc_parts = [p for p in [venue, locality, region] if p]
+            event_info += "\nLocation: {location}".format(location=', '.join(loc_parts))
+
+    if event.get('description'):
+        desc = event['description'][:200]
+        event_info += "\nDescription: {desc}...".format(desc=desc)
+
+    # Format candidates for LLM
+    candidate_list = []
+    for i, candidate in enumerate(candidates, 1):
+        run = candidate['run']
+        run_time = candidate['run_time']
+
+        bls = run.get('bls', [])
+        bl_info = "{count} BL(s): {names}".format(count=len(bls), names=', '.join(bls)) if bls else "No BLs assigned"
+
+        run_info = """Candidate {i}:
+  Run Name: {run_name}
+  Run Time: {run_time}
+  Time Difference: {time_diff:.1f} hours
+  {bl_info}""".format(
+            i=i,
+            run_name=run.get('name'),
+            run_time=run_time.strftime('%Y-%m-%d %I:%M %p %Z'),
+            time_diff=candidate['time_diff_hours'],
+            bl_info=bl_info
+        )
+
+        candidate_list.append(run_info)
+
+    candidates_text = "\n\n".join(candidate_list)
+
+    prompt = """You are matching an Action Network event to calendar runs to find the BL (bottom-liner) assignments.
+
+TARGET ACTION NETWORK EVENT:
+{event_info}
+
+CANDIDATE CALENDAR RUNS:
+{candidates_text}
+
+Analyze the candidates and determine which one (if any) best matches the target event. Consider:
+- Name/title similarity (events might have different names, e.g., "Office Loop Run" vs "Office Loop")
+- Time proximity (runs should be close to the event time)
+- Location (if available)
+- Any other contextual clues
+
+If there is a clear match, respond with ONLY the candidate number (e.g., "1", "2", etc.).
+If there is no good match or the candidates are ambiguous, respond with exactly "NONE".
+
+Your response must be a single word: either a number or "NONE".""".format(
+        event_info=event_info,
+        candidates_text=candidates_text
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that matches events. Always respond with a single number or 'NONE'."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+
+        llm_response = response.choices[0].message.content.strip().upper()
+
+        logger.info(f"      LLM response: {llm_response}")
+
+        if llm_response == "NONE":
+            logger.info(f"      LLM determined no suitable match")
+            return None
+
+        # Try to parse the candidate number
+        try:
+            candidate_num = int(llm_response)
+            if 1 <= candidate_num <= len(candidates):
+                matched_candidate = candidates[candidate_num - 1]
+                matched_run = matched_candidate['run']
+
+                # Add match metadata
+                matched_run['match_time_diff_hours'] = matched_candidate['time_diff_hours']
+                matched_run['match_method'] = 'llm'
+
+                logger.info(f"      LLM selected candidate {candidate_num}")
+                return matched_run
+            else:
+                logger.warning(f"      LLM returned invalid candidate number: {candidate_num}")
+                return None
+        except ValueError:
+            logger.warning(f"      Could not parse LLM response as number: {llm_response}")
+            return None
+
+    except Exception as e:
+        logger.error(f"      ❌ Error in LLM matching: {e}")
+        return None
+
+
 def get_allowed_bls() -> Optional[List[str]]:
-    """Get list of allowed BLs from environment variable. Returns None if not set (allow all)."""
-    allowed_bls_str = os.getenv('ALLOWED_BLS')
+    """Get list of allowed BLs from configuration. Returns None if not set (allow all)."""
+    allowed_bls_str = get_variable("allowed_bls")
+
     if not allowed_bls_str:
         return None
 
@@ -249,16 +532,21 @@ def get_allowed_bls() -> Optional[List[str]]:
     return allowed_bls
 
 
-def validate_bls_against_contacts(client: OpenAI, bl_names: List[str], contacts: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Validate BL names against the contact list using LLM for intelligent matching."""
+def validate_bls_against_contacts(client: OpenAI, bl_names: List[str], contacts: List[Dict[str, str]]) -> tuple[List[Dict[str, str]], List[str]]:
+    """
+    Validate BL names against the contact list using LLM for intelligent matching.
+
+    Returns:
+        Tuple of (valid_bl_contacts, invalid_bl_names)
+    """
     if not bl_names:
-        return []
+        return [], []
 
     contact_names = [contact['name'] for contact in contacts]
-    contact_list = "\n".join([f"- {name}" for name in contact_names])
-    bl_list = "\n".join([f"- {name}" for name in bl_names])
+    contact_list = "\n".join(["- {name}".format(name=name) for name in contact_names])
+    bl_list = "\n".join(["- {name}".format(name=name) for name in bl_names])
 
-    prompt = f"""You are matching names from a calendar to a contact directory.
+    prompt = """You are matching names from a calendar to a contact directory.
 
 BL names from calendar (may have variations):
 {bl_list}
@@ -280,7 +568,10 @@ Example format:
   "John S": "John Smith",
   "mike": "Mike Johnson",
   "Unknown Person": null
-}}"""
+}}""".format(
+        bl_list=bl_list,
+        contact_list=contact_list
+    )
 
     try:
         response = client.chat.completions.create(
@@ -332,13 +623,14 @@ Example format:
             valid_bls = filtered_bls
 
         logger.info(f"Validated {len(valid_bls)} BLs")
-        return valid_bls
+        return valid_bls, invalid_bls
 
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Failed to parse LLM name matching response: {e}")
         logger.warning("Falling back to case-insensitive matching")
 
         valid_bls = []
+        invalid_bls = []
         contact_by_name_lower = {contact['name'].lower(): contact for contact in contacts}
 
         for bl_name in bl_names:
@@ -346,6 +638,7 @@ Example format:
             if bl_name_lower in contact_by_name_lower:
                 valid_bls.append(contact_by_name_lower[bl_name_lower])
             else:
+                invalid_bls.append(bl_name)
                 logger.warning(f"No match found for '{bl_name}'")
 
         allowed_bls = get_allowed_bls()
@@ -359,7 +652,7 @@ Example format:
 
             valid_bls = filtered_bls
 
-        return valid_bls
+        return valid_bls, invalid_bls
 
 
 def format_attendee_message(attendee_name: str, bl_names: List[str], run_name: str, run_datetime: datetime) -> str:
@@ -391,63 +684,43 @@ def format_attendee_message(attendee_name: str, bl_names: List[str], run_name: s
 
 
 def check_if_already_messaged_about_run(
-    client: OpenAI,
     all_messages: List[Dict[str, Any]],
     run_name: str,
     run_datetime: datetime
 ) -> bool:
-    """Use LLM to determine if we've already messaged about this specific run."""
+    """
+    Deterministically check if we've already messaged about this specific run.
+
+    Uses string matching on the predictable message format we send:
+    - Attendee messages: "signed up for {run_name}" and "on {run_time_str}"
+    - BL messages: "You are assigned to BL {run_name}"
+    """
     if not all_messages:
         return False
 
-    conversation_text = []
-    for msg in all_messages[:15]:
-        date = msg.get('date_created', 'Unknown date')
-        body = msg.get('body', '')
-        conversation_text.append(f"[{date}] {body}")
-
-    conversation_str = "\n".join(conversation_text)
+    # Format the run time string exactly as it appears in our messages
     run_time_str = run_datetime.strftime('%A, %B %d at %I:%M %p')
 
-    prompt = f"""You are analyzing message history to determine if we've already sent a message about a specific run event.
+    # Search patterns for the messages we send
+    attendee_pattern_1 = f"signed up for {run_name}"
+    attendee_pattern_2 = f"on {run_time_str}"
+    bl_pattern = f"You are assigned to BL {run_name}"
 
-IMPORTANT: These messages are from MULTIPLE conversations (we may have changed group chats).
+    # Check the most recent messages (we only check the last 15)
+    for msg in all_messages[:15]:
+        body = msg.get('body', '')
 
-TARGET RUN:
-- Name: {run_name}
-- Date/Time: {run_time_str}
+        # Check if this is an attendee message (both patterns must be present)
+        if attendee_pattern_1 in body and attendee_pattern_2 in body:
+            logger.debug(f"Found attendee message match for '{run_name}' on {run_time_str}")
+            return True
 
-ALL MESSAGES WE'VE SENT TO THIS PERSON (most recent, across all conversations):
-{conversation_str}
+        # Check if this is a BL message
+        if bl_pattern in body:
+            logger.debug(f"Found BL message match for '{run_name}'")
+            return True
 
-Question: Have we already sent a message to this person about the "{run_name}" run on {run_time_str}?
-
-Consider:
-- These messages span multiple conversations/group chats
-- We may have messaged about OTHER runs - that's fine, we only care about THIS specific run
-- Look for messages that mention this run name and this specific date/time
-- If there's a message confirming attendance, asking about attendance, or introducing this specific run, answer YES
-- If there are only messages about different runs or dates, answer NO
-- If there are no messages or they're unrelated, answer NO
-
-Respond with ONLY one word: YES or NO"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that analyzes conversation history. Always respond with only YES or NO."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
-        )
-
-        llm_response = response.choices[0].message.content.strip().upper()
-        return llm_response == "YES"
-
-    except Exception as e:
-        logger.warning(f"Error checking if already messaged: {e}")
-        return True
+    return False
 
 
 def fetch_attendee_message_history(attendee_phone: str, attendee_name: str) -> List[Dict[str, Any]]:
@@ -469,8 +742,12 @@ def fetch_attendee_message_history(attendee_phone: str, attendee_name: str) -> L
         return []
 
 
-def check_bl_message_history(client: OpenAI, valid_bl_contacts: List[Dict[str, str]], run_name: str, run_time: datetime) -> bool:
-    """Check if we've already messaged BLs about this run. Returns True if already messaged."""
+def check_bl_message_history(valid_bl_contacts: List[Dict[str, str]], run_name: str, run_time: datetime) -> bool:
+    """
+    Check if we've already messaged BLs about this run. Returns True if already messaged.
+
+    Uses deterministic string matching to check for our predictable message format.
+    """
     for bl_contact in valid_bl_contacts:
         bl_name = bl_contact['name']
         bl_phone = bl_contact['phone_number']
@@ -480,7 +757,6 @@ def check_bl_message_history(client: OpenAI, valid_bl_contacts: List[Dict[str, s
 
             if all_messages:
                 already_messaged = check_if_already_messaged_about_run(
-                    client=client,
                     all_messages=all_messages,
                     run_name=run_name,
                     run_datetime=run_time
@@ -524,10 +800,13 @@ def send_nudge_message_to_bls(
     bl_phone_numbers: List[str],
     run_name: str,
     nudge_candidates: List[Dict[str, Any]],
+    invalid_bl_names: List[str],
     dry_run: bool
 ) -> None:
     """Send nudge suggestions to BLs."""
-    nudge_message = format_nudge_message(bl_names, run_name, nudge_candidates)
+    # Get attendance form link if available
+    attendance_form_link = get_variable('attendance_form_link')
+    nudge_message = format_nudge_message(bl_names, run_name, nudge_candidates, attendance_form_link, invalid_bl_names)
 
     try:
         if dry_run:
@@ -598,7 +877,6 @@ def send_messages_to_attendees(
 
         # Check if we've already messaged this attendee about this run
         already_messaged = check_if_already_messaged_about_run(
-            client=client,
             all_messages=all_messages,
             run_name=run_name,
             run_datetime=run_time
@@ -634,106 +912,140 @@ def send_messages_to_attendees(
     logger.info(f"Messaging complete: {messages_sent} sent, {messages_failed} failed")
 
 
-def process_run(
-    run: Dict[str, Any],
+def process_action_network_event(
+    event: Dict[str, Any],
     client: OpenAI,
     contacts: List[Dict[str, str]],
-    action_network_events: List[Dict[str, Any]],
+    calendar_runs: List[Dict[str, Any]],
     attendance_data: List[Dict[str, Any]],
     current_time: datetime,
     include_nudges: bool,
     dry_run: bool
 ) -> None:
-    """Process a single run: match to Action Network, fetch attendees, send messages."""
-    run_name = run.get('name', 'Unknown')
-    run_time_str = run.get('time', '')
+    """
+    Process a single Action Network event: match to calendar run to find BLs, fetch attendees, send messages.
 
-    logger.info(f"\nProcessing run: {run_name}")
+    This is the main processing function for the Action Network-first workflow.
+    """
+    event_title = event.get('title', event.get('name', 'Unknown'))
+    event_start_time = event.get('parsed_start_time')
+    total_accepted = event.get('total_accepted', 0)
 
-    if run_time_str and action_network_events:
-        try:
-            run_datetime = datetime.fromisoformat(run_time_str)
+    logger.info(f"\nProcessing Action Network event: {event_title}")
+    logger.info(f"Time: {event_start_time.strftime('%Y-%m-%d %I:%M %p %Z')}")
+    logger.info(f"RSVPs: {total_accepted}")
 
-            matched_event = match_run_to_action_network_event(
-                run_name=run_name,
-                run_datetime=run_datetime,
-                action_network_events=action_network_events,
-                openai_client=client,
-                time_window_hours=12
-            )
+    # Match to calendar run to find BLs
+    matched_run = match_action_network_event_to_calendar_run(
+        client=client,
+        event=event,
+        event_start_time=event_start_time,
+        calendar_runs=calendar_runs,
+        time_window_hours=12
+    )
 
-            if matched_event:
-                logger.info(f"Linked to Action Network event: {matched_event.get('title', 'Unknown')}")
-                logger.info(f"Attendance: {matched_event.get('total_accepted', 0)} confirmed")
+    if not matched_run:
+        logger.warning(f"No calendar run found for event '{event_title}' - skipping")
+        return
 
-                run['action_network_event'] = matched_event
-
-                try:
-                    event_id = matched_event.get('id').split(':')[-1]
-                    attendees = get_event_attendees(event_id, max_attendances=100)
-                    run['action_network_attendees'] = attendees
-                    logger.info(f"Found {len(attendees)} attendees")
-                except Exception as e:
-                    logger.warning(f"Error fetching attendees: {e}")
-            else:
-                logger.info(f"No matching Action Network event found")
-        except Exception as e:
-            logger.warning(f"Error matching to Action Network: {e}")
-
-    bl_names = run.get('bls', [])
-    attendees = run.get('action_network_attendees', [])
+    run_name = matched_run.get('name', 'Unknown')
+    bl_names = matched_run.get('bls', [])
+    run_time = datetime.fromisoformat(matched_run.get('time', ''))
 
     if not bl_names:
-        logger.warning(f"No BLs assigned for run '{run_name}'")
+        logger.warning(f"No BLs assigned for matched run '{run_name}' - skipping")
         return
 
     logger.info(f"Found {len(bl_names)} BLs: {', '.join(bl_names)}")
 
-    valid_bl_contacts = validate_bls_against_contacts(client, bl_names, contacts)
+    # Validate BL contacts
+    valid_bl_contacts, invalid_bl_names = validate_bls_against_contacts(client, bl_names, contacts)
 
     if not valid_bl_contacts:
-        logger.warning(f"No valid BL contacts for run '{run_name}'")
+        logger.warning(f"No valid BL contacts for run '{run_name}' - skipping")
         return
 
-    skip_bl_message = False
-    run_time = datetime.fromisoformat(run.get('time', ''))
+    # Fetch attendees from Action Network
+    attendees = []
+    try:
+        event_id = event.get('identifiers', [None])[0]
+        if event_id:
+            event_id = event_id.split(':')[-1]
+            attendees = get_event_attendees(event_id, max_attendances=100)
+            logger.info(f"Fetched {len(attendees)} attendees from Action Network")
+        else:
+            logger.warning(f"No event ID found for event '{event_title}'")
+    except Exception as e:
+        logger.warning(f"Error fetching attendees: {e}")
 
+    if not attendees:
+        logger.info(f"No attendees found for event '{event_title}' - skipping messaging")
+        return
+
+    # Check if we should skip BL message (already sent)
+    skip_bl_message = False
     if include_nudges and valid_bl_contacts:
         logger.info(f"Checking BL message history...")
-        skip_bl_message = check_bl_message_history(client, valid_bl_contacts, run_name, run_time)
+        skip_bl_message = check_bl_message_history(valid_bl_contacts, run_name, run_time)
 
+    # Identify nudge candidates
     nudge_candidates = []
-
     if include_nudges and attendance_data and not skip_bl_message:
         day_of_week = run_time.strftime('%A')
 
-        logger.info(f"Analyzing attendance for nudge candidates...")
+        # Pass both Action Network event name and calendar run name for LLM matching
+        target_run_names = [event_title, run_name]
+        logger.info(f"Analyzing attendance for nudge candidates (matching against '{event_title}' or '{run_name}')...")
         all_nudge_candidates = identify_nudge_candidates(
-            target_run_name=run_name,
+            target_run_names=target_run_names,
             target_day_of_week=day_of_week,
             current_time=current_time,
-            all_runs=attendance_data
+            all_runs=attendance_data,
+            client=client
         )
 
-        bl_names_lower = [name.lower() for name in bl_names]
-        nudge_candidates = [
-            candidate for candidate in all_nudge_candidates
-            if candidate['name'].lower() not in bl_names_lower
-        ]
+        # Filter out BLs using fuzzy matching (handles name variations)
+        nudge_candidates = []
+        for candidate in all_nudge_candidates:
+            is_bl = False
+            candidate_name = candidate['name'].lower()
+
+            # Check if candidate matches any BL name with fuzzy matching
+            from difflib import SequenceMatcher
+            for bl_name in bl_names:
+                bl_name_lower = bl_name.lower()
+                # Calculate similarity
+                similarity = SequenceMatcher(None, candidate_name, bl_name_lower).ratio()
+
+                # High threshold for BL exclusion (0.8) - must be very similar to exclude
+                if similarity >= 0.8:
+                    is_bl = True
+                    logger.info(f"   Excluding '{candidate['name']}' from nudges (matches BL '{bl_name}' with {similarity:.2f} similarity)")
+                    break
+
+            if not is_bl:
+                nudge_candidates.append(candidate)
 
         nudge_candidates = filter_nudge_candidates_by_rsvp(nudge_candidates, attendees)
 
         logger.info(f"Identified {len(nudge_candidates)} nudge candidates")
 
+    # Send nudge suggestions to BLs
     if include_nudges and valid_bl_contacts and not skip_bl_message:
         logger.info(f"Sending nudge suggestions to BLs...")
+        # Extract validated BL names from valid contacts
+        validated_bl_names = [contact['name'] for contact in valid_bl_contacts]
         bl_phone_numbers = [contact['phone_number'] for contact in valid_bl_contacts]
-        send_nudge_message_to_bls(bl_names, bl_phone_numbers, run_name, nudge_candidates, dry_run)
 
+        send_nudge_message_to_bls(validated_bl_names, bl_phone_numbers, run_name, nudge_candidates, invalid_bl_names, dry_run)
+
+    # Send messages to attendees
     if attendees and valid_bl_contacts:
         logger.info(f"Sending messages to attendees...")
+        # Extract validated BL names from valid contacts
+        validated_bl_names = [contact['name'] for contact in valid_bl_contacts]
         send_messages_to_attendees(
-            client, attendees, valid_bl_contacts, bl_names, run_name, run_time, dry_run
+            client, attendees, valid_bl_contacts, validated_bl_names, run_name, run_time, dry_run
         )
 
 
@@ -743,10 +1055,16 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
     logger.info(f"Starting BeauchBot cron execution at {start_time}")
 
     try:
-        required_vars = ["OPENAI_API_KEY", "GOOGLE_SERVICE_ACCOUNT_B64", "PHONE_DIRECTORY_DOC_ID"]
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        # Check for required configuration variables
+        required_vars = ["openai_api_key", "google_service_account_b64", "phone_directory_doc_id"]
+        missing_vars = []
+        for var in required_vars:
+            if not get_variable(var):
+                missing_vars.append(var)
+
         if missing_vars:
-            logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+            logger.error(f"Missing required configuration variables: {', '.join(missing_vars)}")
+            logger.error(f"Set as Windmill variables (f/run_club/<name>) or environment variables (UPPER_CASE)")
             return 1
 
         eastern_tz = ZoneInfo("America/New_York")
@@ -762,7 +1080,7 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
             current_time = datetime.now(eastern_tz)
             logger.info(f"Current time: {current_time.strftime('%Y-%m-%d %I:%M %p %Z')}")
 
-        client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        client = OpenAI(api_key=require_variable('openai_api_key'))
 
         drive_service = get_google_drive_service()
         results = drive_service.files().list(
@@ -788,27 +1106,36 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
         document = docs_service.documents().get(documentId=calendar_doc_id).execute()
         calendar_text = extract_text_from_document(document)
 
-        all_runs = parse_runs_from_calendar(client, calendar_text, current_time)
-
-        if not all_runs:
-            logger.warning("No runs found in calendar")
-            return 0
-
-        applicable_hours = 10
-        runs = filter_runs_by_time_window(all_runs, current_time, hours=applicable_hours)
-
-        if not runs:
-            logger.info(f"No runs found within {applicable_hours} hours")
-            return 0
-
+        # Fetch Action Network events first
         action_network_events = []
         try:
             action_network_events = fetch_all_action_network_events(max_pages=3)
             logger.info(f"Loaded {len(action_network_events)} Action Network events")
         except Exception as e:
             logger.error(f"Failed to fetch Action Network events: {e}")
-            logger.warning("Continuing without Action Network integration")
+            logger.warning("Cannot continue without Action Network events")
+            return 1
 
+        # Filter Action Network events by time window
+        applicable_hours = 10
+        filtered_events = filter_action_network_events_by_time_window(
+            action_network_events, current_time, hours=applicable_hours
+        )
+
+        if not filtered_events:
+            logger.info(f"No Action Network events found within {applicable_hours} hours")
+            return 0
+
+        # Parse ALL calendar runs (not filtered by time) so we can match against them
+        all_calendar_runs = parse_runs_from_calendar(client, calendar_text, current_time)
+
+        if not all_calendar_runs:
+            logger.warning("No runs found in calendar")
+            return 0
+
+        logger.info(f"Parsed {len(all_calendar_runs)} total runs from calendar")
+
+        # Load attendance data for nudge suggestions
         attendance_data = []
         if include_nudges:
             try:
@@ -818,6 +1145,7 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
                 logger.error(f"Failed to load attendance data: {e}")
                 logger.warning("Continuing without nudge suggestions")
 
+        # Load contacts
         contacts = get_allowed_contacts()
         if not contacts:
             logger.error("Could not load contacts from phone directory")
@@ -825,10 +1153,14 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
 
         logger.info(f"Loaded {len(contacts)} contacts from phone directory")
 
-        for i, run in enumerate(runs, 1):
+        # Process each Action Network event
+        for i, event in enumerate(filtered_events, 1):
             logger.info(f"\n{'='*60}")
-            logger.info(f"Run {i}/{len(runs)}")
-            process_run(run, client, contacts, action_network_events, attendance_data, current_time, include_nudges, dry_run)
+            logger.info(f"Event {i}/{len(filtered_events)}")
+            process_action_network_event(
+                event, client, contacts, all_calendar_runs, attendance_data,
+                current_time, include_nudges, dry_run
+            )
 
         end_time = datetime.now()
         duration = end_time - start_time
@@ -843,26 +1175,33 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
         return 1
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="BeauchBot cron job entry point")
-    parser.add_argument("--dry-run", "-d", action="store_true", help="Dry run (don't send texts)")
-    parser.add_argument("--simulate-time", "-t", help="Simulate time (format: 'YYYY-MM-DD,HH:MM' or 'YYYY-MM-DD')")
-    parser.add_argument("--include-nudges", "-n", action="store_true", help="Include nudge suggestions (default: disabled)")
+def main(
+    dry_run: bool = False,
+    simulate_time: str = "",
+    include_nudges: bool = False
+):
+    """
+    Main entry point for Windmill workflow.
 
-    args = parser.parse_args()
+    Args:
+        dry_run: If True, don't actually send messages (default: False)
+        simulate_time: Simulate time in format 'YYYY-MM-DD,HH:MM' or 'YYYY-MM-DD' (default: current time)
+        include_nudges: If True, include attendance-based nudge analysis (default: False)
 
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
     eastern_tz = ZoneInfo("America/New_York")
-    now = parse_simulated_time(args.simulate_time) if args.simulate_time else datetime.now(eastern_tz)
+    now = parse_simulated_time(simulate_time) if simulate_time else datetime.now(eastern_tz)
 
     if now.hour < 8 or now.hour >= 20:
         logger.info(f"Outside operating hours (8 AM - 8 PM). Current hour: {now.hour}")
         return 0
 
     exit_code = run_cron_execution(
-        simulated_time=args.simulate_time,
-        dry_run=args.dry_run,
-        include_nudges=args.include_nudges
+        simulated_time=simulate_time if simulate_time else None,
+        dry_run=dry_run,
+        include_nudges=include_nudges
     )
 
     if exit_code == 0:
@@ -874,4 +1213,16 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # For local testing, you can still run this script
+    import argparse
+    parser = argparse.ArgumentParser(description="BeauchBot cron job entry point")
+    parser.add_argument("--dry-run", "-d", action="store_true", help="Dry run (don't send texts)")
+    parser.add_argument("--simulate-time", "-t", help="Simulate time (format: 'YYYY-MM-DD,HH:MM' or 'YYYY-MM-DD')", default="")
+    parser.add_argument("--include-nudges", "-n", action="store_true", help="Include nudge suggestions (default: disabled)")
+    args = parser.parse_args()
+
+    sys.exit(main(
+        dry_run=args.dry_run,
+        simulate_time=args.simulate_time,
+        include_nudges=args.include_nudges
+    ))
